@@ -18,8 +18,10 @@ const state = {
   me: null,
   leaving: false,
   welcomed: false,
+  closed: false,      // the room was closed; the canvas stays for viewing
+  deadline: 0,        // performance.now() at which the room's hour runs out
   backoff: 500,
-  members: new Map(), // id -> name
+  members: new Map(), // id -> {name, creator}
   strokes: new Map(), // id -> {color, width, pts}, in drawing order
   current: null,      // {id, localId, pending}
   seq: 0,
@@ -30,11 +32,19 @@ const state = {
 const clientId = (() => {
   let id = load("clientId");
   if (!id) {
-    id = crypto.randomUUID();
+    id = randomId();
     save("clientId", id);
   }
   return id;
 })();
+
+function randomId() {
+  // randomUUID exists only in secure contexts (HTTPS or localhost), so plain
+  // HTTP on a LAN address needs the fallback.
+  if (crypto.randomUUID) return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 
 function load(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -58,7 +68,11 @@ function showLobby(error = "") {
 
 $("#create").addEventListener("click", async () => {
   try {
-    const res = await fetch("/api/rooms", { method: "POST" });
+    const res = await fetch("/api/rooms", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ clientId }),
+    });
     if (!res.ok) throw new Error(res.status === 503 ? "Сервер перевантажений, спробуйте пізніше." : `Помилка ${res.status}`);
     const { code } = await res.json();
     enterRoom(code);
@@ -96,6 +110,7 @@ function enterRoom(code) {
   state.code = code;
   state.leaving = false;
   state.backoff = 500;
+  setClosed(false);
   history.replaceState(null, "", `#${code}`);
   $("#copy").textContent = code;
   $("#lobby").hidden = true;
@@ -105,9 +120,63 @@ function enterRoom(code) {
 }
 
 $("#leave").addEventListener("click", () => {
+  if (state.me?.creator && !state.closed && state.ws?.readyState === WebSocket.OPEN) {
+    // The server answers by closing every connection, ours included.
+    if (confirm("Закрити кімнату для всіх учасників?")) send({ type: "close_room" });
+    return;
+  }
   state.leaving = true;
   state.ws?.close(1000);
   showLobby();
+});
+
+const CLOSE_REASONS = {
+  creator_left: "Творець закрив кімнату.",
+  creator_gone: "Творець не повертався 5 хвилин, тому кімнату закрито.",
+  expired: "Минула година з моменту створення, тому кімнату закрито.",
+};
+
+function roomClosed(reason) {
+  if (reason === "creator_left" && state.me?.creator) {
+    showLobby();
+    return;
+  }
+  setClosed(true);
+  $("#closed-text").textContent = CLOSE_REASONS[reason] ?? "Кімнату закрито.";
+}
+
+// setClosed switches between drawing and viewing a closed room's canvas.
+function setClosed(closed) {
+  state.closed = closed;
+  state.current = null;
+  $("#closed").hidden = !closed;
+  for (const el of document.querySelectorAll(".toolbar .tool")) el.disabled = closed;
+  if (closed) {
+    for (const id of [...state.cursors.keys()]) removeCursor(id);
+    setStatus("");
+  }
+  updateLeaveButton();
+}
+
+function updateLeaveButton() {
+  $("#leave").textContent = state.closed ? "До лобі" : state.me?.creator ? "Закрити кімнату" : "Вийти";
+}
+
+$("#save-png").addEventListener("click", () => {
+  const out = document.createElement("canvas");
+  out.width = canvas.width;
+  out.height = canvas.height;
+  const octx = out.getContext("2d");
+  octx.fillStyle = "#ffffff"; // the canvas itself is transparent
+  octx.fillRect(0, 0, out.width, out.height);
+  octx.drawImage(canvas, 0, 0);
+  out.toBlob((blob) => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `room-${state.code}.png`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, "image/png");
 });
 
 $("#copy").addEventListener("click", async () => {
@@ -130,9 +199,13 @@ function connect() {
   setStatus("Підключення…");
 
   ws.onmessage = (e) => handle(JSON.parse(e.data));
-  ws.onclose = async () => {
+  ws.onclose = async (e) => {
     if (state.ws !== ws || state.leaving) return;
     state.current = null;
+    if (e.code === 4000) {
+      roomClosed(e.reason);
+      return;
+    }
     // The browser hides the HTTP status of a failed upgrade, so ask why.
     if (!state.welcomed) {
       const problem = await checkRoom(state.code);
@@ -158,7 +231,9 @@ function handle(msg) {
       state.backoff = 500;
       state.me = msg.you;
       state.current = null;
-      state.members = new Map(msg.members.map((m) => [m.id, m.name]));
+      state.deadline = performance.now() + msg.expiresIn;
+      state.members = new Map(msg.members.map((m) => [m.id, m]));
+      updateLeaveButton();
       state.strokes.clear();
       for (const id of [...state.cursors.keys()]) removeCursor(id);
       renderMembers();
@@ -187,7 +262,7 @@ function handle(msg) {
       redraw();
       break;
     case "member_joined":
-      for (const m of msg.members) state.members.set(m.id, m.name);
+      for (const m of msg.members) state.members.set(m.id, m);
       renderMembers();
       break;
     case "member_left":
@@ -283,7 +358,7 @@ function normalize(e) {
 }
 
 canvas.addEventListener("pointerdown", (e) => {
-  if (!state.me || state.ws?.readyState !== WebSocket.OPEN || e.button !== 0) return;
+  if (!state.me || state.closed || state.ws?.readyState !== WebSocket.OPEN || e.button !== 0) return;
   canvas.setPointerCapture(e.pointerId);
   const localId = `s${++state.seq}`;
   const id = `${state.me.id}:${localId}`;
@@ -347,9 +422,10 @@ document.addEventListener("keydown", (e) => {
 function renderMembers() {
   const list = $("#members");
   list.replaceChildren();
-  for (const [id, name] of state.members) {
+  for (const [id, { name, creator }] of state.members) {
     const li = document.createElement("li");
-    li.textContent = id === state.me?.id ? `${name} (ви)` : name;
+    li.textContent = name + (creator ? " ★" : "") + (id === state.me?.id ? " (ви)" : "");
+    if (creator) li.title = "Творець кімнати";
     if (id === state.me?.id) li.className = "me";
     list.append(li);
   }
@@ -366,7 +442,7 @@ function moveCursor(id, pos) {
     c = { el, label, timer: 0 };
     state.cursors.set(id, c);
   }
-  c.label.textContent = state.members.get(id) ?? "?";
+  c.label.textContent = state.members.get(id)?.name ?? "?";
   c.el.style.left = `${pos[0] * 100}%`;
   c.el.style.top = `${pos[1] * 100}%`;
   c.el.style.opacity = "1";
@@ -381,6 +457,22 @@ function removeCursor(id) {
   c.el.remove();
   state.cursors.delete(id);
 }
+
+// ---------- room lifetime ----------
+
+const WARN_MS = 5 * 60 * 1000;
+
+setInterval(() => {
+  const el = $("#countdown");
+  const left = state.deadline - performance.now();
+  if (!state.code || state.closed || !state.welcomed || left > WARN_MS) {
+    el.hidden = true;
+    return;
+  }
+  const secs = Math.max(0, Math.ceil(left / 1000));
+  el.textContent = `Кімната закриється через ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+  el.hidden = false;
+}, 1000);
 
 // ---------- misc ----------
 

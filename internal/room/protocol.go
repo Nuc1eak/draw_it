@@ -15,6 +15,7 @@ const (
 	TypeUndo          = "undo"
 	TypeClear         = "clear"
 	TypeCursor        = "cursor"
+	TypeCloseRoom     = "close_room"
 	TypeWelcome       = "welcome"
 	TypeHistory       = "history"
 	TypeSynced        = "synced"
@@ -37,8 +38,9 @@ type Point [2]float32
 
 // Member is the public view of a room participant.
 type Member struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Creator bool   `json:"creator,omitempty"`
 }
 
 // Message is the envelope for every client and server message. Which fields
@@ -56,8 +58,11 @@ type Message struct {
 	Members  []Member  `json:"members,omitempty"`
 	IDs      []string  `json:"ids,omitempty"`
 	Msgs     []Message `json:"msgs,omitempty"`
-	Code     string    `json:"code,omitempty"`
-	Text     string    `json:"msg,omitempty"`
+	// ExpiresIn is the time left until MaxLifetime, in milliseconds. It is
+	// relative so that clients with a skewed clock still count down correctly.
+	ExpiresIn int64  `json:"expiresIn,omitempty"`
+	Code      string `json:"code,omitempty"`
+	Text      string `json:"msg,omitempty"`
 }
 
 // protoError is reported back to the sender as an error message; the
@@ -108,7 +113,7 @@ func validateInbound(m *Message) error {
 		}
 	case TypeStrokeEnd:
 		return validateStrokeID(m.ID)
-	case TypeUndo, TypeClear:
+	case TypeUndo, TypeClear, TypeCloseRoom:
 	case TypeCursor:
 		if m.Pos == nil {
 			return &protoError{"bad_cursor", "pos is required"}

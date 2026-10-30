@@ -24,13 +24,18 @@
   <section id="room" class="room" hidden>
     <header class="toolbar">
       <button id="copy" class="code" title="Скопіювати посилання"></button>
-      <input id="color" type="color" value="#1d3557" title="Колір">
-      <input id="width" type="range" min="1" max="50" value="6" title="Товщина">
-      <button id="undo" title="Скасувати (Ctrl+Z)">Скасувати</button>
-      <button id="clear">Очистити</button>
+      <input id="color" class="tool" type="color" value="#1d3557" title="Колір">
+      <input id="width" class="tool" type="range" min="1" max="50" value="6" title="Товщина">
+      <button id="undo" class="tool" title="Скасувати (Ctrl+Z)">Скасувати</button>
+      <button id="clear" class="tool">Очистити</button>
       <span id="status" class="status"></span>
+      <span id="countdown" class="countdown" role="timer" hidden></span>
       <button id="leave">Вийти</button>
     </header>
+    <div id="closed" class="closed" role="alert" hidden>
+      <span id="closed-text"></span>
+      <button id="save-png">Зберегти PNG</button>
+    </div>
     <div class="workspace">
       <div id="stage-wrap" class="stage-wrap">
         <div id="stage" class="stage">

@@ -2,12 +2,14 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
@@ -22,26 +24,53 @@ const (
 
 var clientIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,64}$`)
 
-type server struct {
-	reg *room.Registry
-	cfg room.Config
+// Server is the HTTP handler for the API, WebSocket and frontend.
+type Server struct {
+	reg   *room.Registry
+	cfg   room.Config
+	mux   *http.ServeMux
+	conns sync.WaitGroup // WebSocket connections, which http.Server.Shutdown does not track
 }
 
-// New returns the HTTP handler. static serves the frontend; nil disables it.
-func New(reg *room.Registry, cfg room.Config, static http.FileSystem) http.Handler {
-	s := &server{reg: reg, cfg: cfg}
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/rooms", s.createRoom)
-	mux.HandleFunc("GET /api/rooms/{code}", s.roomInfo)
-	mux.HandleFunc("GET /ws/{code}", s.connect)
+// New returns the handler. static serves the frontend; nil disables it.
+func New(reg *room.Registry, cfg room.Config, static http.FileSystem) *Server {
+	s := &Server{reg: reg, cfg: cfg, mux: http.NewServeMux()}
+	s.mux.HandleFunc("POST /api/rooms", s.createRoom)
+	s.mux.HandleFunc("GET /api/rooms/{code}", s.roomInfo)
+	s.mux.HandleFunc("GET /ws/{code}", s.connect)
 	if static != nil {
-		mux.Handle("GET /", http.FileServer(static))
+		s.mux.Handle("GET /", http.FileServer(static))
 	}
-	return mux
+	return s
 }
 
-func (s *server) createRoom(w http.ResponseWriter, r *http.Request) {
-	code, err := s.reg.Create()
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
+
+// WaitConns blocks until every WebSocket connection has finished closing, or
+// until ctx is done.
+func (s *Server) WaitConns(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() {
+		s.conns.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Server) createRoom(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ClientID string `json:"clientId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1024)).Decode(&body); err != nil || !clientIDRe.MatchString(body.ClientID) {
+		http.Error(w, `body must be {"clientId": "<8..64 chars of [A-Za-z0-9_-]>"}`, http.StatusBadRequest)
+		return
+	}
+	code, err := s.reg.Create(body.ClientID)
 	if err != nil {
 		slog.Warn("create room", "err", err)
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
@@ -50,7 +79,7 @@ func (s *server) createRoom(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{"code": code})
 }
 
-func (s *server) roomInfo(w http.ResponseWriter, r *http.Request) {
+func (s *Server) roomInfo(w http.ResponseWriter, r *http.Request) {
 	h, ok := s.lookup(r)
 	if !ok {
 		http.Error(w, "room not found", http.StatusNotFound)
@@ -66,7 +95,7 @@ func (s *server) roomInfo(w http.ResponseWriter, r *http.Request) {
 
 // connect checks the room and joins it before upgrading, so a missing or full
 // room is reported with a plain HTTP status.
-func (s *server) connect(w http.ResponseWriter, r *http.Request) {
+func (s *Server) connect(w http.ResponseWriter, r *http.Request) {
 	h, ok := s.lookup(r)
 	if !ok {
 		http.Error(w, "room not found", http.StatusNotFound)
@@ -89,6 +118,8 @@ func (s *server) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.conns.Add(1)
+	defer s.conns.Done()
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		h.Leave(c)
@@ -97,7 +128,7 @@ func (s *server) connect(w http.ResponseWriter, r *http.Request) {
 	c.Serve(r.Context(), conn)
 }
 
-func (s *server) lookup(r *http.Request) (*room.Hub, bool) {
+func (s *Server) lookup(r *http.Request) (*room.Hub, bool) {
 	code, ok := room.NormalizeCode(r.PathValue("code"))
 	if !ok {
 		return nil, false

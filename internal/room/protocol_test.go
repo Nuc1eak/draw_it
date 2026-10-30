@@ -28,6 +28,7 @@ func TestValidateInbound(t *testing.T) {
 		{"end no id", Message{Type: TypeStrokeEnd}, "bad_id"},
 		{"undo", Message{Type: TypeUndo}, ""},
 		{"clear", Message{Type: TypeClear}, ""},
+		{"close room", Message{Type: TypeCloseRoom}, ""},
 		{"cursor", Message{Type: TypeCursor, Pos: pos(0.2, 0.3)}, ""},
 		{"cursor no pos", Message{Type: TypeCursor}, "bad_cursor"},
 		{"cursor out of range", Message{Type: TypeCursor, Pos: pos(2, 0)}, "bad_cursor"},

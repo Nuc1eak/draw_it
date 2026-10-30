@@ -33,9 +33,10 @@ func NewRegistry(ctx context.Context, cfg Config) *Registry {
 	return &Registry{ctx: ctx, cfg: cfg, rand: rand.Reader, rooms: make(map[string]*Hub)}
 }
 
-// Create starts a new empty room and returns its code. The room expires after
-// EmptyTTL if nobody joins.
-func (r *Registry) Create() (string, error) {
+// Create starts a new empty room owned by the client creatorID and returns
+// its code. The room closes if the creator does not connect within
+// CreatorGrace.
+func (r *Registry) Create(creatorID string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.rooms) >= r.cfg.MaxRooms {
@@ -50,7 +51,7 @@ func (r *Registry) Create() (string, error) {
 			continue
 		}
 		var h *Hub
-		h = newHub(code, r.cfg, func() { r.remove(code, h) })
+		h = newHub(code, creatorID, r.cfg, func() { r.remove(code, h) })
 		r.rooms[code] = h
 		r.wg.Go(func() { h.run(r.ctx) })
 		return code, nil

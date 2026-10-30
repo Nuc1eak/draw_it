@@ -89,6 +89,20 @@ input:not([type]) {
 .toolbar .code { font-family: ui-monospace, monospace; letter-spacing: 0.15em; font-weight: 600; }
 .toolbar input[type=color] { width: 36px; height: 32px; padding: 0; border: none; background: none; }
 .status { flex: 1; color: var(--muted); font-size: 13px; }
+.countdown { font-size: 13px; font-weight: 600; color: var(--error); font-variant-numeric: tabular-nums; }
+.countdown[hidden], .closed[hidden] { display: none; }
+
+.closed {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--error);
+}
+
+.closed span { flex: 1; }
 
 .workspace { flex: 1; display: flex; min-height: 0; }
 

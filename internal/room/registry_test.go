@@ -22,7 +22,7 @@ func newTestRegistry(t *testing.T, cfg Config) *Registry {
 
 func TestRegistryCreateAndGet(t *testing.T) {
 	r := newTestRegistry(t, testConfig())
-	code, err := r.Create()
+	code, err := r.Create("client-a1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,11 +41,11 @@ func TestRegistryCreateAndGet(t *testing.T) {
 func TestRegistryRoomLimit(t *testing.T) {
 	r := newTestRegistry(t, DefaultConfig())
 	for i := range 500 {
-		if _, err := r.Create(); err != nil {
+		if _, err := r.Create("client-a1"); err != nil {
 			t.Fatalf("room %d: %v", i+1, err)
 		}
 	}
-	if _, err := r.Create(); !errors.Is(err, ErrTooManyRooms) {
+	if _, err := r.Create("client-a1"); !errors.Is(err, ErrTooManyRooms) {
 		t.Fatalf("room 501: err = %v, want ErrTooManyRooms", err)
 	}
 }
@@ -60,25 +60,25 @@ func (zeroReader) Read(p []byte) (int, error) {
 func TestRegistryCodeCollision(t *testing.T) {
 	r := newTestRegistry(t, testConfig())
 	r.rand = zeroReader{} // always "AAAAA"
-	if code, err := r.Create(); err != nil || code != "AAAAA" {
+	if code, err := r.Create("client-a1"); err != nil || code != "AAAAA" {
 		t.Fatalf("first create = %q, %v", code, err)
 	}
-	if _, err := r.Create(); !errors.Is(err, ErrNoFreeCode) {
+	if _, err := r.Create("client-a1"); !errors.Is(err, ErrNoFreeCode) {
 		t.Fatalf("second create: err = %v, want ErrNoFreeCode", err)
 	}
 
 	// A collision followed by a free code succeeds on retry.
 	r.rand = io.MultiReader(bytes.NewReader(make([]byte, 2*CodeLen)), bytes.NewReader(bytes.Repeat([]byte{1}, 2*CodeLen)))
-	if code, err := r.Create(); err != nil || code != "BBBBB" {
+	if code, err := r.Create("client-a1"); err != nil || code != "BBBBB" {
 		t.Fatalf("retry create = %q, %v; want BBBBB", code, err)
 	}
 }
 
 func TestRegistryDropsExpiredRoom(t *testing.T) {
 	cfg := testConfig()
-	cfg.EmptyTTL = 20 * time.Millisecond
+	cfg.CreatorGrace = 20 * time.Millisecond
 	r := newTestRegistry(t, cfg)
-	code, err := r.Create()
+	code, err := r.Create("client-a1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestRegistryShutdown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := NewRegistry(ctx, testConfig())
 	for range 3 {
-		if _, err := r.Create(); err != nil {
+		if _, err := r.Create("client-a1"); err != nil {
 			t.Fatal(err)
 		}
 	}

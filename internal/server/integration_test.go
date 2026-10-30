@@ -3,6 +3,7 @@ package server_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand/v2"
 	"net/http"
@@ -37,9 +38,13 @@ func newTestServer(t *testing.T, cfg room.Config) *testServer {
 	return &testServer{Server: srv, cfg: cfg}
 }
 
+// creatorID is the client ID connect gives the user named "Alice", so Alice
+// owns every room created by createRoom.
+const creatorID = "client-alice"
+
 func (ts *testServer) createRoom(t *testing.T) string {
 	t.Helper()
-	resp, err := http.Post(ts.URL+"/api/rooms", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/rooms", "application/json", strings.NewReader(`{"clientId":"`+creatorID+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -386,12 +391,178 @@ func TestCreateRoomLimit(t *testing.T) {
 	cfg.MaxRooms = 1
 	ts := newTestServer(t, cfg)
 	ts.createRoom(t)
-	resp, err := http.Post(ts.URL+"/api/rooms", "application/json", nil)
+	resp, err := http.Post(ts.URL+"/api/rooms", "application/json", strings.NewReader(`{"clientId":"`+creatorID+`"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status %d, want 503", resp.StatusCode)
+	}
+}
+
+func TestCreateRoomRequiresClientID(t *testing.T) {
+	ts := newTestServer(t, room.DefaultConfig())
+	for _, body := range []string{"", "{}", `{"clientId":"short"}`, `{"clientId":"has spaces in it"}`} {
+		resp, err := http.Post(ts.URL+"/api/rooms", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("body %q: status %d, want 400", body, resp.StatusCode)
+		}
+	}
+}
+
+// readClose reads until the connection closes and returns its close status.
+func (c *wsClient) readClose(ctx context.Context) websocket.CloseError {
+	c.t.Helper()
+	for {
+		_, _, err := c.conn.Read(ctx)
+		if err == nil {
+			continue
+		}
+		var ce websocket.CloseError
+		if !errors.As(err, &ce) {
+			c.t.Fatalf("%s: connection ended without a close frame: %v", c.me.Name, err)
+		}
+		return ce
+	}
+}
+
+func TestCreatorClosesRoom(t *testing.T) {
+	ts := newTestServer(t, room.DefaultConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	code := ts.createRoom(t)
+	a, _ := ts.connect(t, ctx, code, "Alice")
+	b, _ := ts.connect(t, ctx, code, "Bob")
+	if !a.me.Creator || b.me.Creator {
+		t.Fatalf("creator flags: Alice=%v Bob=%v", a.me.Creator, b.me.Creator)
+	}
+	a.readType(ctx, room.TypeMemberJoined)
+
+	b.write(ctx, room.Message{Type: room.TypeCloseRoom})
+	if m := b.readType(ctx, room.TypeError); m.Code != "forbidden" {
+		t.Fatalf("Bob closing the room: error %q, want forbidden", m.Code)
+	}
+
+	a.write(ctx, room.Message{Type: room.TypeCloseRoom})
+	for _, c := range []*wsClient{a, b} {
+		if ce := c.readClose(ctx); ce.Code != room.StatusRoomClosed || ce.Reason != room.ReasonCreatorLeft {
+			t.Fatalf("%s: closed with %v %q, want %v %q", c.me.Name, ce.Code, ce.Reason, room.StatusRoomClosed, room.ReasonCreatorLeft)
+		}
+	}
+	resp, err := http.Get(ts.URL + "/api/rooms/" + code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("closed room: status %d, want 404", resp.StatusCode)
+	}
+}
+
+// TestSlowClientGetsPolicyViolation checks the close frame a kicked client
+// actually receives. Bob reads nothing, so the server's write to him blocks on
+// a full TCP buffer, while he keeps sending. The kick used to cancel that
+// in-flight write and drop the connection without a close frame.
+func TestSlowClientGetsPolicyViolation(t *testing.T) {
+	cfg := room.DefaultConfig()
+	cfg.SendBuffer = 16
+	ts := newTestServer(t, cfg)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	code := ts.createRoom(t)
+	a, _ := ts.connect(t, ctx, code, "Alice")
+	b, _ := ts.connect(t, ctx, code, "Bob")
+	a.readType(ctx, room.TypeMemberJoined)
+
+	kicked := make(chan struct{})
+	go func() {
+		defer close(kicked)
+		for {
+			_, data, err := a.conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			var m room.Message
+			if json.Unmarshal(data, &m) == nil && m.Type == room.TypeMemberLeft && m.MemberID == b.me.ID {
+				return
+			}
+		}
+	}()
+	// Bob's bad messages are answered only to Bob, so the hub keeps handling
+	// his reads while his writes are stuck.
+	bobDone := make(chan struct{})
+	go func() {
+		defer close(bobDone)
+		for {
+			select {
+			case <-kicked:
+				return
+			case <-time.After(time.Millisecond):
+			}
+			if b.conn.Write(ctx, websocket.MessageText, []byte(`{"type":"nope"}`)) != nil {
+				return
+			}
+		}
+	}()
+
+	pts := make([]room.Point, room.MaxPointsPerMessage)
+	for i := range pts {
+		pts[i] = room.Point{0.1234, 0.5678}
+	}
+	for n := 0; ; n++ {
+		select {
+		case <-kicked:
+		default:
+			id := fmt.Sprintf("s%d", n/50)
+			if n%50 == 0 {
+				a.write(ctx, room.Message{Type: room.TypeStrokeStart, ID: id, Color: "#000000", Width: 2})
+			}
+			a.write(ctx, room.Message{Type: room.TypeStrokePoints, ID: id, Pts: pts})
+			continue
+		}
+		break
+	}
+	<-bobDone
+
+	if ce := b.readClose(ctx); ce.Code != websocket.StatusPolicyViolation {
+		t.Fatalf("Bob closed with %v %q, want %v", ce.Code, ce.Reason, websocket.StatusPolicyViolation)
+	}
+}
+
+func TestInboundMessageLimit(t *testing.T) {
+	ts := newTestServer(t, room.DefaultConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	code := ts.createRoom(t)
+	a, _ := ts.connect(t, ctx, code, "Alice")
+	b, _ := ts.connect(t, ctx, code, "Bob")
+	a.readType(ctx, room.TypeMemberJoined)
+
+	padded := func(size int) []byte {
+		msg := []byte(`{"type":"cursor","pos":[0.5,0.5]}`)
+		return append(msg, strings.Repeat(" ", size-len(msg))...)
+	}
+	limit := int(ts.cfg.MaxMessageBytes)
+
+	if err := a.conn.Write(ctx, websocket.MessageText, padded(limit)); err != nil {
+		t.Fatal(err)
+	}
+	if m := b.readType(ctx, room.TypeCursor); m.MemberID != a.me.ID {
+		t.Fatalf("cursor from %q, want %q", m.MemberID, a.me.ID)
+	}
+
+	if err := a.conn.Write(ctx, websocket.MessageText, padded(limit+1)); err != nil {
+		t.Fatal(err)
+	}
+	if ce := a.readClose(ctx); ce.Code != websocket.StatusMessageTooBig {
+		t.Fatalf("oversized message: closed with %v, want %v", ce.Code, websocket.StatusMessageTooBig)
+	}
+	if m := b.readType(ctx, room.TypeMemberLeft); m.MemberID != a.me.ID {
+		t.Fatalf("member_left %q, want %q", m.MemberID, a.me.ID)
 	}
 }

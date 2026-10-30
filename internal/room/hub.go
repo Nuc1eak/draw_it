@@ -17,6 +17,16 @@ var (
 	ErrRoomGone = errors.New("room no longer exists")
 )
 
+// StatusRoomClosed is the WebSocket close code sent to every member when a
+// room closes; the close reason is one of the Reason constants.
+const StatusRoomClosed websocket.StatusCode = 4000
+
+const (
+	ReasonCreatorLeft = "creator_left" // the creator closed the room
+	ReasonCreatorGone = "creator_gone" // the creator was away for CreatorGrace
+	ReasonExpired     = "expired"      // MaxLifetime passed since creation
+)
+
 // Config holds the tunable limits of rooms and their connections.
 type Config struct {
 	MaxRooms        int
@@ -25,7 +35,8 @@ type Config struct {
 	MaxStrokePoints int // a stroke is ended automatically once it reaches this
 	MaxMessageBytes int64
 	SendBuffer      int
-	EmptyTTL        time.Duration
+	CreatorGrace    time.Duration // the room closes once its creator is away this long
+	MaxLifetime     time.Duration // the room closes this long after creation
 	WriteTimeout    time.Duration
 	PingInterval    time.Duration
 }
@@ -39,7 +50,8 @@ func DefaultConfig() Config {
 		MaxStrokePoints: 50_000,
 		MaxMessageBytes: 16 * 1024,
 		SendBuffer:      1024,
-		EmptyTTL:        time.Minute,
+		CreatorGrace:    5 * time.Minute,
+		MaxLifetime:     time.Hour,
 		WriteTimeout:    10 * time.Second,
 		PingInterval:    30 * time.Second,
 	}
@@ -69,9 +81,11 @@ type inbound struct {
 // Hub owns all state of one room. Every field below the channels is touched
 // only by the run goroutine.
 type Hub struct {
-	code   string
-	cfg    Config
-	onExit func()
+	code     string
+	creator  string // client ID of whoever created the room
+	cfg      Config
+	deadline time.Time
+	onExit   func()
 
 	join    chan joinReq
 	leave   chan *Client
@@ -79,25 +93,30 @@ type Hub struct {
 	count   chan chan int
 	done    chan struct{}
 
-	members    map[*Client]struct{}
-	nextMember int
-	strokes    []*stroke
-	byID       map[string]*stroke
-	total      int
+	members      map[*Client]struct{}
+	nextMember   int
+	creatorConns int
+	grace        *time.Timer // runs while no connection of the creator is in the room
+	closing      bool
+	strokes      []*stroke
+	byID         map[string]*stroke
+	total        int
 }
 
-func newHub(code string, cfg Config, onExit func()) *Hub {
+func newHub(code, creator string, cfg Config, onExit func()) *Hub {
 	return &Hub{
-		code:    code,
-		cfg:     cfg,
-		onExit:  onExit,
-		join:    make(chan joinReq),
-		leave:   make(chan *Client),
-		inbound: make(chan inbound),
-		count:   make(chan chan int),
-		done:    make(chan struct{}),
-		members: make(map[*Client]struct{}),
-		byID:    make(map[string]*stroke),
+		code:     code,
+		creator:  creator,
+		cfg:      cfg,
+		deadline: time.Now().Add(cfg.MaxLifetime),
+		onExit:   onExit,
+		join:     make(chan joinReq),
+		leave:    make(chan *Client),
+		inbound:  make(chan inbound),
+		count:    make(chan chan int),
+		done:     make(chan struct{}),
+		members:  make(map[*Client]struct{}),
+		byID:     make(map[string]*stroke),
 	}
 }
 
@@ -158,43 +177,43 @@ func (h *Hub) deliver(ctx context.Context, in inbound) bool {
 
 func (h *Hub) run(ctx context.Context) {
 	defer close(h.done)
-	ttl := time.NewTimer(h.cfg.EmptyTTL)
-	defer ttl.Stop()
+	defer h.onExit()
+	// The creator has not connected yet, so the grace period starts now.
+	h.grace = time.NewTimer(h.cfg.CreatorGrace)
+	defer h.grace.Stop()
+	lifetime := time.NewTimer(time.Until(h.deadline))
+	defer lifetime.Stop()
+
 	for {
 		select {
 		case req := <-h.join:
-			if err := h.handleJoin(req.c); err != nil {
-				req.reply <- err
-				continue
-			}
-			ttl.Stop()
-			req.reply <- nil
+			req.reply <- h.handleJoin(req.c)
 		case c := <-h.leave:
 			h.remove(c, websocket.StatusNormalClosure, "")
-			if len(h.members) == 0 {
-				ttl.Reset(h.cfg.EmptyTTL)
-			}
 		case in := <-h.inbound:
-			if _, ok := h.members[in.c]; ok {
-				h.handle(in)
-			}
-			if len(h.members) == 0 {
-				ttl.Reset(h.cfg.EmptyTTL)
+			if _, ok := h.members[in.c]; ok && h.handle(in) {
+				h.closeAll(StatusRoomClosed, ReasonCreatorLeft)
+				return
 			}
 		case reply := <-h.count:
 			reply <- len(h.members)
-		case <-ttl.C:
-			if len(h.members) == 0 {
-				h.onExit()
-				return
-			}
+		case <-h.grace.C:
+			h.closeAll(StatusRoomClosed, ReasonCreatorGone)
+			return
+		case <-lifetime.C:
+			h.closeAll(StatusRoomClosed, ReasonExpired)
+			return
 		case <-ctx.Done():
-			for c := range h.members {
-				h.remove(c, websocket.StatusGoingAway, "server shutting down")
-			}
-			h.onExit()
+			h.closeAll(websocket.StatusGoingAway, "server shutting down")
 			return
 		}
+	}
+}
+
+func (h *Hub) closeAll(code websocket.StatusCode, reason string) {
+	h.closing = true
+	for c := range h.members {
+		h.remove(c, code, reason)
 	}
 }
 
@@ -205,10 +224,20 @@ func (h *Hub) handleJoin(c *Client) error {
 	h.nextMember++
 	c.seq = h.nextMember
 	c.member.ID = "m" + strconv.Itoa(h.nextMember)
+	c.member.Creator = c.clientID == h.creator
 	h.members[c] = struct{}{}
+	if c.member.Creator {
+		h.creatorConns++
+		h.grace.Stop()
+	}
 
 	you := c.member
-	c.welcome = encode(Message{Type: TypeWelcome, You: &you, Members: h.memberList()})
+	c.welcome = encode(Message{
+		Type:      TypeWelcome,
+		You:       &you,
+		Members:   h.memberList(),
+		ExpiresIn: max(time.Until(h.deadline).Milliseconds(), 1),
+	})
 	c.snapshot = make([]strokeSnap, len(h.strokes))
 	for i, s := range h.strokes {
 		c.snapshot[i] = s.snap()
@@ -230,7 +259,9 @@ func (h *Hub) memberList() []Member {
 	return out
 }
 
-// remove drops c from the room, finishing any stroke it left open.
+// remove drops c from the room, finishing any stroke it left open. Calls for
+// clients that are no longer members change nothing, so a late Leave cannot
+// restart the creator's grace period.
 func (h *Hub) remove(c *Client, code websocket.StatusCode, reason string) {
 	if _, ok := h.members[c]; !ok {
 		return
@@ -238,6 +269,15 @@ func (h *Hub) remove(c *Client, code websocket.StatusCode, reason string) {
 	delete(h.members, c)
 	c.closeCode, c.closeReason = code, reason
 	close(c.done)
+	if c.member.Creator {
+		h.creatorConns--
+		if h.creatorConns == 0 && !h.closing {
+			h.grace.Reset(h.cfg.CreatorGrace)
+		}
+	}
+	if h.closing {
+		return
+	}
 	for _, s := range h.strokes {
 		if s.author == c.member.ID && !s.ended {
 			s.ended = true
@@ -245,6 +285,8 @@ func (h *Hub) remove(c *Client, code websocket.StatusCode, reason string) {
 		}
 	}
 	h.broadcast(Message{Type: TypeMemberLeft, MemberID: c.member.ID}, nil)
+	// Strokes that just ended may now be evictable.
+	h.evict()
 }
 
 // broadcast sends m to every member except skip. Members whose buffer is full
@@ -275,25 +317,27 @@ func (h *Hub) sendTo(c *Client, m Message) {
 	}
 }
 
-func (h *Hub) handle(in inbound) {
+// handle applies one message from a member. It reports whether the creator
+// asked to close the room.
+func (h *Hub) handle(in inbound) (closeRoom bool) {
 	c, m := in.c, in.msg
 	if in.err != nil {
 		h.sendTo(c, errorMessage("bad_json", in.err.Error()))
-		return
+		return false
 	}
 	if err := validateInbound(&m); err != nil {
 		var pe *protoError
 		if errors.As(err, &pe) {
 			h.sendTo(c, errorMessage(pe.Code, pe.Text))
 		}
-		return
+		return false
 	}
 	switch m.Type {
 	case TypeStrokeStart:
 		id := c.member.ID + ":" + m.ID
 		if _, dup := h.byID[id]; dup {
 			h.sendTo(c, errorMessage("duplicate_stroke", "stroke id already used"))
-			return
+			return false
 		}
 		s := &stroke{id: id, author: c.member.ID, owner: c.clientID, color: m.Color, width: m.Width}
 		h.strokes = append(h.strokes, s)
@@ -302,7 +346,7 @@ func (h *Hub) handle(in inbound) {
 	case TypeStrokePoints:
 		s := h.byID[c.member.ID+":"+m.ID]
 		if s == nil || s.ended {
-			return // cleared, undone or evicted while being drawn
+			return false // cleared, undone or evicted while being drawn
 		}
 		pts := m.Pts[:min(len(m.Pts), h.cfg.MaxStrokePoints-len(s.pts))]
 		s.pts = append(s.pts, pts...)
@@ -316,7 +360,7 @@ func (h *Hub) handle(in inbound) {
 	case TypeStrokeEnd:
 		s := h.byID[c.member.ID+":"+m.ID]
 		if s == nil || s.ended {
-			return
+			return false
 		}
 		s.ended = true
 		h.broadcast(Message{Type: TypeStrokeEnd, ID: s.id, Author: s.author}, c)
@@ -326,7 +370,7 @@ func (h *Hub) handle(in inbound) {
 			if s := h.strokes[i]; s.owner == c.clientID {
 				h.dropStrokes(map[*stroke]bool{s: true})
 				h.broadcast(Message{Type: TypeStrokeRemoved, IDs: []string{s.id}}, nil)
-				return
+				return false
 			}
 		}
 	case TypeClear:
@@ -336,7 +380,14 @@ func (h *Hub) handle(in inbound) {
 		h.broadcast(Message{Type: TypeCleared, MemberID: c.member.ID}, nil)
 	case TypeCursor:
 		h.broadcast(Message{Type: TypeCursor, MemberID: c.member.ID, Pos: m.Pos}, c)
+	case TypeCloseRoom:
+		if !c.member.Creator {
+			h.sendTo(c, errorMessage("forbidden", "only the room creator can close the room"))
+			return false
+		}
+		return true
 	}
+	return false
 }
 
 // evict drops the oldest ended strokes until the room is within MaxPoints.

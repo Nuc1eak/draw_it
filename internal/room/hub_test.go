@@ -14,25 +14,55 @@ import (
 
 const waitTimeout = 2 * time.Second
 
+// testCreator is the client ID that owns every hub started by startHub.
+const testCreator = "client-a1"
+
 func testConfig() Config {
 	cfg := DefaultConfig()
-	cfg.EmptyTTL = time.Hour
+	cfg.CreatorGrace = time.Hour
+	cfg.MaxLifetime = time.Hour
 	return cfg
 }
 
-// startHub runs a hub without a registry. exited is closed when the hub
-// calls onExit.
+// startHub runs a hub owned by testCreator without a registry. exited is
+// closed when the hub calls onExit.
 func startHub(t *testing.T, cfg Config) (h *Hub, exited chan struct{}) {
 	t.Helper()
-	exited = make(chan struct{})
-	h = newHub("TEST1", cfg, func() { close(exited) })
 	ctx, cancel := context.WithCancel(context.Background())
-	go h.run(ctx)
+	h, exited = startHubCtx(ctx, cfg)
 	t.Cleanup(func() {
 		cancel()
 		<-h.done
 	})
 	return h, exited
+}
+
+func startHubCtx(ctx context.Context, cfg Config) (h *Hub, exited chan struct{}) {
+	exited = make(chan struct{})
+	h = newHub("TEST1", testCreator, cfg, func() { close(exited) })
+	go h.run(ctx)
+	return h, exited
+}
+
+func waitClosed(t *testing.T, c *Client, code websocket.StatusCode, reason string) {
+	t.Helper()
+	select {
+	case <-c.done:
+	case <-time.After(waitTimeout):
+		t.Fatalf("%s was not disconnected", c.member.Name)
+	}
+	if c.closeCode != code || c.closeReason != reason {
+		t.Fatalf("%s closed with %v %q, want %v %q", c.member.Name, c.closeCode, c.closeReason, code, reason)
+	}
+}
+
+func waitExit(t *testing.T, exited chan struct{}) {
+	t.Helper()
+	select {
+	case <-exited:
+	case <-time.After(waitTimeout):
+		t.Fatal("room did not close")
+	}
 }
 
 func join(t *testing.T, h *Hub, name, clientID string) *Client {
@@ -392,44 +422,188 @@ func TestHubRejectsInvalidMessages(t *testing.T) {
 	expectQuiet(t, b, a)
 }
 
-func TestHubExpiresWhenEmpty(t *testing.T) {
+func TestHubLeaveTriggersEviction(t *testing.T) {
 	cfg := testConfig()
-	cfg.EmptyTTL = 50 * time.Millisecond
+	cfg.MaxPoints = 5
+	h, _ := startHub(t, cfg)
+	a := join(t, h, "A", testCreator)
+	b := join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	// Over the limit, but nothing can go while the only stroke is open.
+	draw(t, b, "s1", line(8, 0.1), false)
+	recvType(t, a, TypeStrokeStart)
+	recvType(t, a, TypeStrokePoints)
+	expectQuiet(t, a, b)
+
+	h.Leave(b)
+	recvType(t, a, TypeStrokeEnd)
+	recvType(t, a, TypeMemberLeft)
+	if m := recvType(t, a, TypeStrokeRemoved); !slices.Equal(m.IDs, []string{"m2:s1"}) {
+		t.Fatalf("evicted %v, want [m2:s1]", m.IDs)
+	}
+}
+
+func TestHubMarksCreator(t *testing.T) {
+	h, _ := startHub(t, testConfig())
+	b := join(t, h, "B", "client-b1")
+	a := join(t, h, "A", testCreator)
+	if !a.member.Creator || b.member.Creator {
+		t.Fatalf("creator flags: A=%v B=%v, want true false", a.member.Creator, b.member.Creator)
+	}
+	var w Message
+	if err := json.Unmarshal(a.welcome, &w); err != nil {
+		t.Fatal(err)
+	}
+	if !w.You.Creator || w.Members[0].Creator || !w.Members[1].Creator {
+		t.Fatalf("welcome = %s", a.welcome)
+	}
+	if m := recvType(t, b, TypeMemberJoined); !m.Members[0].Creator {
+		t.Fatalf("member_joined for the creator = %+v", m.Members)
+	}
+}
+
+func TestHubCreatorClosesRoom(t *testing.T) {
+	h, exited := startHub(t, testConfig())
+	a := join(t, h, "A", testCreator)
+	b := join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	send(t, b, Message{Type: TypeCloseRoom})
+	if m := recvType(t, b, TypeError); m.Code != "forbidden" {
+		t.Fatalf("error code = %q, want forbidden", m.Code)
+	}
+
+	send(t, a, Message{Type: TypeCloseRoom})
+	waitClosed(t, a, StatusRoomClosed, ReasonCreatorLeft)
+	waitClosed(t, b, StatusRoomClosed, ReasonCreatorLeft)
+	waitExit(t, exited)
+	if _, err := h.Join("C", "client-c1"); !errors.Is(err, ErrRoomGone) {
+		t.Fatalf("join closed room: err = %v, want ErrRoomGone", err)
+	}
+}
+
+func TestHubClosesWhenCreatorAway(t *testing.T) {
+	cfg := testConfig()
+	cfg.CreatorGrace = 50 * time.Millisecond
 	h, exited := startHub(t, cfg)
-	a := join(t, h, "A", "client-a1")
+	a := join(t, h, "A", testCreator)
+	b := join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	h.Leave(a) // e.g. the tab was closed
+	recvType(t, b, TypeMemberLeft)
+	waitClosed(t, b, StatusRoomClosed, ReasonCreatorGone)
+	waitExit(t, exited)
+}
+
+func TestHubClosesIfCreatorNeverJoins(t *testing.T) {
+	cfg := testConfig()
+	cfg.CreatorGrace = 50 * time.Millisecond
+	h, exited := startHub(t, cfg)
+	b := join(t, h, "B", "client-b1")
+	waitClosed(t, b, StatusRoomClosed, ReasonCreatorGone)
+	waitExit(t, exited)
+}
+
+func TestHubCreatorReturnsWithinGrace(t *testing.T) {
+	cfg := testConfig()
+	cfg.CreatorGrace = 150 * time.Millisecond
+	h, exited := startHub(t, cfg)
+	a := join(t, h, "A", testCreator)
+	join(t, h, "B", "client-b1")
+
 	h.Leave(a)
+	time.Sleep(cfg.CreatorGrace / 3)
+	join(t, h, "A", testCreator) // reload
 	select {
 	case <-exited:
-	case <-time.After(waitTimeout):
-		t.Fatal("empty room did not expire")
+		t.Fatal("room closed although the creator came back")
+	case <-time.After(3 * cfg.CreatorGrace):
 	}
-	if _, err := h.Join("B", "client-b1"); !errors.Is(err, ErrRoomGone) {
-		t.Fatalf("join after expiry: err = %v, want ErrRoomGone", err)
+	if n, err := h.Members(); err != nil || n != 2 {
+		t.Fatalf("members = %d, %v; want 2, nil", n, err)
 	}
 }
 
-func TestHubExpiresIfNobodyJoins(t *testing.T) {
+func TestHubCreatorSecondTabKeepsRoom(t *testing.T) {
 	cfg := testConfig()
-	cfg.EmptyTTL = 50 * time.Millisecond
-	_, exited := startHub(t, cfg)
-	select {
-	case <-exited:
-	case <-time.After(waitTimeout):
-		t.Fatal("unused room did not expire")
-	}
-}
-
-func TestHubStaysWhileOccupied(t *testing.T) {
-	cfg := testConfig()
-	cfg.EmptyTTL = 50 * time.Millisecond
+	cfg.CreatorGrace = 50 * time.Millisecond
 	h, exited := startHub(t, cfg)
-	join(t, h, "A", "client-a1")
+	tab1 := join(t, h, "A", testCreator)
+	join(t, h, "A", testCreator)
+
+	h.Leave(tab1)
 	select {
 	case <-exited:
-		t.Fatal("occupied room expired")
-	case <-time.After(4 * cfg.EmptyTTL):
+		t.Fatal("room closed while the creator still had a tab open")
+	case <-time.After(4 * cfg.CreatorGrace):
 	}
-	if n, err := h.Members(); err != nil || n != 1 {
-		t.Fatalf("members = %d, %v; want 1, nil", n, err)
+}
+
+// TestHubStaleLeaveDoesNotExtendGrace covers a Leave that arrives after the
+// hub already removed the client, as Serve does once its connection closes.
+func TestHubStaleLeaveDoesNotExtendGrace(t *testing.T) {
+	cfg := testConfig()
+	cfg.CreatorGrace = 400 * time.Millisecond
+	h, exited := startHub(t, cfg)
+	a := join(t, h, "A", testCreator)
+	b := join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	h.Leave(a)
+	left := time.Now()
+	time.Sleep(300 * time.Millisecond)
+	h.Leave(a) // stale: a is no longer a member
+	h.Leave(b) // the room becomes empty
+
+	waitExit(t, exited)
+	// Restarting the grace period at 300ms would close the room at ~700ms.
+	if elapsed := time.Since(left); elapsed > 600*time.Millisecond {
+		t.Fatalf("room closed %v after the creator left, want about %v", elapsed, cfg.CreatorGrace)
+	}
+}
+
+func TestHubLifetime(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxLifetime = 100 * time.Millisecond
+	h, exited := startHub(t, cfg)
+	a := join(t, h, "A", testCreator)
+	var w Message
+	if err := json.Unmarshal(a.welcome, &w); err != nil {
+		t.Fatal(err)
+	}
+	if w.ExpiresIn <= 0 || w.ExpiresIn > cfg.MaxLifetime.Milliseconds() {
+		t.Fatalf("expiresIn = %d, want in (0, %d]", w.ExpiresIn, cfg.MaxLifetime.Milliseconds())
+	}
+	// The creator being present does not keep the room open past its lifetime.
+	waitClosed(t, a, StatusRoomClosed, ReasonExpired)
+	waitExit(t, exited)
+}
+
+func TestHubShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	h, exited := startHubCtx(ctx, testConfig())
+	a := join(t, h, "A", testCreator)
+	cancel()
+	waitClosed(t, a, websocket.StatusGoingAway, "server shutting down")
+	waitExit(t, exited)
+}
+
+func TestDefaultConfigMatchesAgreedLimits(t *testing.T) {
+	want := Config{
+		MaxRooms:        500,
+		MaxMembers:      10,
+		MaxPoints:       500_000,
+		MaxStrokePoints: 50_000,
+		MaxMessageBytes: 16 * 1024,
+		SendBuffer:      1024,
+		CreatorGrace:    5 * time.Minute,
+		MaxLifetime:     time.Hour,
+		WriteTimeout:    10 * time.Second,
+		PingInterval:    30 * time.Second,
+	}
+	if got := DefaultConfig(); got != want {
+		t.Fatalf("DefaultConfig() = %+v\nwant %+v", got, want)
 	}
 }
