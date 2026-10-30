@@ -4,6 +4,7 @@ Realtime collaborative drawing rooms. Go backend, WebSocket, vanilla JS + canvas
 # Commands
 - Run: go run ./cmd/server
 - Test: go test -race ./...
+- Test frontend: node --test web/ (logic lives in web/room.js; app.js is DOM glue)
 - Lint: go vet ./...
 
 # Conventions
