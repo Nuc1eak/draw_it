@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Drawing Rooms</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main id="lobby" class="lobby">
+    <h1>Drawing Rooms</h1>
+    <p class="hint">Малюйте разом у реальному часі. Створіть кімнату й поділіться кодом.</p>
+    <label>Ваше ім'я
+      <input id="name" maxlength="20" autocomplete="nickname" placeholder="Гість">
+    </label>
+    <button id="create" class="primary">Створити кімнату</button>
+    <form id="join-form" class="join">
+      <input id="code" maxlength="5" placeholder="КОД" autocomplete="off" spellcheck="false">
+      <button type="submit">Приєднатися</button>
+    </form>
+    <p id="lobby-error" class="error" role="alert"></p>
+  </main>
+
+  <section id="room" class="room" hidden>
+    <header class="toolbar">
+      <button id="copy" class="code" title="Скопіювати посилання"></button>
+      <input id="color" type="color" value="#1d3557" title="Колір">
+      <input id="width" type="range" min="1" max="50" value="6" title="Товщина">
+      <button id="undo" title="Скасувати (Ctrl+Z)">Скасувати</button>
+      <button id="clear">Очистити</button>
+      <span id="status" class="status"></span>
+      <button id="leave">Вийти</button>
+    </header>
+    <div class="workspace">
+      <div id="stage-wrap" class="stage-wrap">
+        <div id="stage" class="stage">
+          <canvas id="canvas"></canvas>
+          <div id="cursors"></div>
+        </div>
+      </div>
+      <aside>
+        <h2>Учасники</h2>
+        <ul id="members"></ul>
+      </aside>
+    </div>
+    <div id="toast" class="toast" role="status"></div>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
