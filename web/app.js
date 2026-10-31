@@ -1,31 +1,61 @@
-"use strict";
+import {
+  Brush,
+  MAX_MEMBERS,
+  MAX_RECENTS,
+  MAX_TEXT_LENGTH,
+  MAX_WIDTH,
+  MIN_WIDTH,
+  ERASER_COLOR,
+  PALETTE,
+  Room,
+  STATUS_ROOM_CLOSED,
+  closeOutcome,
+  floodFill,
+  hexToRgb,
+  hsvToHex,
+  initial,
+  isRoomCode,
+  leaveLabel,
+  memberColor,
+  memberTint,
+  normalizePoint,
+  randomId,
+  roomProblem,
+  textSize,
+} from "./room.js";
 
-// Canvas keeps a fixed aspect ratio so normalized coordinates mean the same
-// thing on every screen. Line widths are relative to a 1000px-wide canvas.
-const ASPECT = 16 / 10;
+// The canvas has one fixed resolution for everyone, so normalized coordinates
+// mean the same thing on every screen and a fill covers the same pixels;
+// CSS only scales it. Line widths are relative to a 1000px-wide canvas.
+const CANVAS_W = 2000;
+const CANVAS_H = 1250;
+const ASPECT = CANVAS_W / CANVAS_H;
 const REF_WIDTH = 1000;
+const MIN_PANEL = 190; // keep in sync with .members in style.css
+const GAP = 12;
+const CARD_BORDERS = 2;
+const TEXT_LINE_HEIGHT = 1.2; // keep in sync with .text-entry in style.css
 const FLUSH_MS = 30;
 const CURSOR_MS = 50;
-const MAX_POINTS_PER_MSG = 500;
 
 const $ = (sel) => document.querySelector(sel);
 const canvas = $("#canvas");
-const ctx = canvas.getContext("2d");
+const ctx = canvas.getContext("2d", { willReadFrequently: true }); // fills read pixels
+canvas.width = CANVAS_W;
+canvas.height = CANVAS_H;
 
+const room = new Room();
+const brush = new Brush();
 const state = {
   code: null,
   ws: null,
-  me: null,
+  target: null, // the code being joined, kept for "try again"
+  attempt: 0, // bumped to abandon a join still waiting for the server
   leaving: false,
   welcomed: false,
-  closed: false,      // the room was closed; the canvas stays for viewing
-  deadline: 0,        // performance.now() at which the room's hour runs out
+  closed: false, // the room was closed; the canvas stays for viewing
   backoff: 500,
-  members: new Map(), // id -> {name, creator}
-  strokes: new Map(), // id -> {color, width, pts}, in drawing order
-  current: null,      // {id, localId, pending}
-  seq: 0,
-  cursors: new Map(), // member id -> {el, timer}
+  cursors: new Map(), // member id -> {el, label, timer}
   lastCursor: 0,
 };
 
@@ -37,14 +67,6 @@ const clientId = (() => {
   }
   return id;
 })();
-
-function randomId() {
-  // randomUUID exists only in secure contexts (HTTPS or localhost), so plain
-  // HTTP on a LAN address needs the fallback.
-  if (crypto.randomUUID) return crypto.randomUUID();
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
-}
 
 function load(key) {
   try { return localStorage.getItem(key); } catch { return null; }
@@ -58,15 +80,41 @@ function save(key, value) {
 
 $("#name").value = load("name") || "";
 
+const SCREENS = ["lobby", "connecting", "not-found", "full", "room"];
+
+function showScreen(name) {
+  for (const id of SCREENS) $(`#${id}`).hidden = id !== name;
+  if (name === "room") resize();
+}
+
 function showLobby(error = "") {
   state.code = null;
-  $("#room").hidden = true;
-  $("#lobby").hidden = false;
+  showScreen("lobby");
   $("#lobby-error").textContent = error;
   history.replaceState(null, "", location.pathname);
 }
 
-$("#create").addEventListener("click", async () => {
+function showConnecting(code) {
+  state.target = code;
+  for (const el of document.querySelectorAll(".room-ref")) el.textContent = code;
+  showScreen("connecting");
+}
+
+function showProblem(problem) {
+  if (!problem.screen) {
+    showLobby(problem.text);
+    return;
+  }
+  state.code = null;
+  if (problem.screen === "full") {
+    $("#full-count").textContent = `${problem.members} з ${problem.capacity}`;
+    $("#seats").replaceChildren(...Array.from({ length: problem.capacity }, () => document.createElement("span")));
+  }
+  showScreen(problem.screen);
+  $(`#${problem.screen} .primary`).focus();
+}
+
+async function createRoom() {
   try {
     const res = await fetch("/api/rooms", {
       method: "POST",
@@ -77,31 +125,43 @@ $("#create").addEventListener("click", async () => {
     const { code } = await res.json();
     enterRoom(code);
   } catch (err) {
-    $("#lobby-error").textContent = err.message;
+    showLobby(err.message);
   }
-});
+}
 
-$("#join-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const code = $("#code").value.trim().toUpperCase();
+// joinRoom opens an existing room, unless the server says it cannot be joined.
+async function joinRoom(code) {
+  const attempt = ++state.attempt;
+  showConnecting(code);
   const problem = await checkRoom(code);
-  if (problem) $("#lobby-error").textContent = problem.text;
+  if (attempt !== state.attempt) return; // cancelled meanwhile
+  if (problem) showProblem(problem);
   else enterRoom(code);
+}
+
+$("#create").addEventListener("click", createRoom);
+for (const el of document.querySelectorAll(".create-new")) el.addEventListener("click", createRoom);
+
+$("#join-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  joinRoom($("#code").value.trim().toUpperCase());
 });
 
-// checkRoom returns null if the room can be joined, otherwise a user-facing
-// reason; fatal reasons mean retrying will not help.
+$("#other-code").addEventListener("click", () => {
+  showLobby();
+  $("#code").select();
+  $("#code").focus();
+});
+
+$("#retry").addEventListener("click", () => joinRoom(state.target));
+
 async function checkRoom(code) {
-  if (!/^[A-Z0-9]{5}$/.test(code)) return { text: "Код складається з 5 символів.", fatal: true };
+  if (!isRoomCode(code)) return roomProblem(code, null, null);
   try {
     const res = await fetch(`/api/rooms/${code}`);
-    if (res.status === 404) return { text: "Кімнату не знайдено.", fatal: true };
-    if (!res.ok) return { text: `Помилка ${res.status}`, fatal: false };
-    const info = await res.json();
-    if (info.members >= info.capacity) return { text: "Кімната заповнена.", fatal: true };
-    return null;
+    return roomProblem(code, res.status, res.ok ? await res.json() : null);
   } catch {
-    return { text: "Немає з'єднання з сервером.", fatal: false };
+    return roomProblem(code, null, null);
   }
 }
 
@@ -110,48 +170,51 @@ function enterRoom(code) {
   state.code = code;
   state.leaving = false;
   state.backoff = 500;
+  room.reset();
   setClosed(false);
   history.replaceState(null, "", `#${code}`);
-  $("#copy").textContent = code;
-  $("#lobby").hidden = true;
-  $("#room").hidden = false;
-  resize();
+  $("#room-code").textContent = code;
+  showConnecting(code);
   connect();
 }
 
 $("#leave").addEventListener("click", () => {
-  if (state.me?.creator && !state.closed && state.ws?.readyState === WebSocket.OPEN) {
+  if (room.me?.creator && !state.closed && state.ws?.readyState === WebSocket.OPEN) {
     // The server answers by closing every connection, ours included.
     if (confirm("Закрити кімнату для всіх учасників?")) send({ type: "close_room" });
     return;
   }
+  leaveToLobby();
+});
+
+$("#cancel").addEventListener("click", leaveToLobby);
+
+function leaveToLobby() {
+  state.attempt++;
   state.leaving = true;
   state.ws?.close(1000);
   showLobby();
-});
-
-const CLOSE_REASONS = {
-  creator_left: "Творець закрив кімнату.",
-  creator_gone: "Творець не повертався 5 хвилин, тому кімнату закрито.",
-  expired: "Минула година з моменту створення, тому кімнату закрито.",
-};
+}
 
 function roomClosed(reason) {
-  if (reason === "creator_left" && state.me?.creator) {
+  const outcome = closeOutcome(reason, room.me?.creator ?? false);
+  if (outcome.lobby) {
     showLobby();
     return;
   }
   setClosed(true);
-  $("#closed-text").textContent = CLOSE_REASONS[reason] ?? "Кімнату закрито.";
+  showScreen("room");
+  $("#closed-text").textContent = outcome.text;
 }
 
 // setClosed switches between drawing and viewing a closed room's canvas.
 function setClosed(closed) {
   state.closed = closed;
-  state.current = null;
+  room.current = null;
   $("#closed").hidden = !closed;
-  for (const el of document.querySelectorAll(".toolbar .tool")) el.disabled = closed;
+  for (const el of document.querySelectorAll(".tool-group")) el.inert = closed;
   if (closed) {
+    closeText();
     for (const id of [...state.cursors.keys()]) removeCursor(id);
     setStatus("");
   }
@@ -159,21 +222,14 @@ function setClosed(closed) {
 }
 
 function updateLeaveButton() {
-  $("#leave").textContent = state.closed ? "До лобі" : state.me?.creator ? "Закрити кімнату" : "Вийти";
+  $("#leave").textContent = leaveLabel({ closed: state.closed, creator: room.me?.creator ?? false });
 }
 
-$("#save-png").addEventListener("click", () => {
-  const out = document.createElement("canvas");
-  out.width = canvas.width;
-  out.height = canvas.height;
-  const octx = out.getContext("2d");
-  octx.fillStyle = "#ffffff"; // the canvas itself is transparent
-  octx.fillRect(0, 0, out.width, out.height);
-  octx.drawImage(canvas, 0, 0);
-  out.toBlob((blob) => {
+$("#save").addEventListener("click", () => {
+  canvas.toBlob((blob) => {
     const a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
-    a.download = `room-${state.code}.png`;
+    a.download = `room-${$("#room-code").textContent}.png`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   }, "image/png");
@@ -201,16 +257,17 @@ function connect() {
   ws.onmessage = (e) => handle(JSON.parse(e.data));
   ws.onclose = async (e) => {
     if (state.ws !== ws || state.leaving) return;
-    state.current = null;
-    if (e.code === 4000) {
+    room.current = null;
+    if (e.code === STATUS_ROOM_CLOSED) {
       roomClosed(e.reason);
       return;
     }
     // The browser hides the HTTP status of a failed upgrade, so ask why.
     if (!state.welcomed) {
       const problem = await checkRoom(state.code);
+      if (state.ws !== ws || state.leaving) return; // cancelled meanwhile
       if (problem?.fatal) {
-        showLobby(problem.text);
+        showProblem(problem);
         return;
       }
     }
@@ -224,81 +281,42 @@ function send(msg) {
   if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify(msg));
 }
 
-function handle(msg) {
-  switch (msg.type) {
-    case "welcome":
-      state.welcomed = true;
-      state.backoff = 500;
-      state.me = msg.you;
-      state.current = null;
-      state.deadline = performance.now() + msg.expiresIn;
-      state.members = new Map(msg.members.map((m) => [m.id, m]));
-      updateLeaveButton();
-      state.strokes.clear();
-      for (const id of [...state.cursors.keys()]) removeCursor(id);
-      renderMembers();
-      redraw();
-      setStatus("Синхронізація…");
-      break;
-    case "history":
-      for (const m of msg.msgs) applyStroke(m);
-      break;
-    case "synced":
-      setStatus("");
-      break;
-    case "stroke_start":
-    case "stroke_points":
-    case "stroke_end":
-      applyStroke(msg);
-      break;
-    case "stroke_removed":
-      for (const id of msg.ids) state.strokes.delete(id);
-      if (state.current && msg.ids.includes(state.current.id)) state.current = null;
-      redraw();
-      break;
-    case "cleared":
-      state.strokes.clear();
-      state.current = null;
-      redraw();
-      break;
-    case "member_joined":
-      for (const m of msg.members) state.members.set(m.id, m);
-      renderMembers();
-      break;
-    case "member_left":
-      state.members.delete(msg.memberId);
-      removeCursor(msg.memberId);
-      renderMembers();
-      break;
-    case "cursor":
-      moveCursor(msg.memberId, msg.pos);
-      break;
-    case "error":
-      toast(`Помилка: ${msg.msg}`);
-      break;
-  }
+function sendAll(msgs) {
+  for (const m of msgs) send(m);
 }
 
-function applyStroke(msg) {
-  if (msg.type === "stroke_start") {
-    state.strokes.set(msg.id, { color: msg.color, width: msg.width, pts: [] });
-  } else if (msg.type === "stroke_points") {
-    const s = state.strokes.get(msg.id);
-    if (!s) return;
-    for (const p of msg.pts) addPoint(s, p);
-  } else if (msg.type === "stroke_end" && state.current?.id === msg.id) {
-    // The server ended our stroke (length limit): stop sending to it.
-    flush();
-    state.current = null;
+function handle(msg) {
+  if (msg.type === "welcome") {
+    state.welcomed = true;
+    state.backoff = 500;
   }
+  const fx = room.apply(msg, performance.now());
+  if (fx.resetCursors) for (const id of [...state.cursors.keys()]) removeCursor(id);
+  if (fx.cursorGone) removeCursor(fx.cursorGone);
+  if (fx.members) {
+    renderMembers();
+    updateLeaveButton();
+  }
+  if (fx.redraw) redraw();
+  else for (const d of fx.draws) drawFrom(d.stroke, d.from);
+  if (fx.cursor) moveCursor(fx.cursor);
+  if (fx.status !== undefined) setStatus(fx.status);
+  if (msg.type === "synced") showScreen("room");
+  if (fx.error) toast(fx.error);
 }
 
 // ---------- drawing ----------
 
-function addPoint(s, p) {
-  const prev = s.pts[s.pts.length - 1];
-  s.pts.push(p);
-  drawSegment(s, prev ?? p, p);
+function drawFrom(s, from) {
+  if (s.kind === "fill") {
+    drawFill(s);
+    return;
+  }
+  if (s.kind === "text") {
+    drawText(s);
+    return;
+  }
+  for (let i = from; i < s.pts.length; i++) drawSegment(s, s.pts[i - 1] ?? s.pts[i], s.pts[i]);
 }
 
 function drawSegment(s, a, b) {
@@ -321,128 +339,281 @@ function drawSegment(s, a, b) {
   ctx.stroke();
 }
 
+function drawFill(s) {
+  const [x, y] = s.pts[0];
+  const col = Math.min(Math.floor(x * CANVAS_W), CANVAS_W - 1);
+  const row = Math.min(Math.floor(y * CANVAS_H), CANVAS_H - 1);
+  const image = ctx.getImageData(0, 0, CANVAS_W, CANVAS_H);
+  if (floodFill(image.data, CANVAS_W, CANVAS_H, col, row, hexToRgb(s.color))) ctx.putImageData(image, 0, 0);
+}
+
+function drawText(s) {
+  const size = (textSize(s.width) * CANVAS_W) / REF_WIDTH;
+  ctx.fillStyle = s.color;
+  ctx.font = `500 ${size}px Manrope, system-ui, sans-serif`;
+  ctx.textBaseline = "alphabetic";
+  // The same baseline as in the editor, so the text stays put when committed.
+  const { fontBoundingBoxAscent: ascent, fontBoundingBoxDescent: descent } = ctx.measureText(s.text);
+  const baseline = (TEXT_LINE_HEIGHT * size - ascent - descent) / 2 + ascent;
+  ctx.fillText(s.text, s.pts[0][0] * CANVAS_W, s.pts[0][1] * CANVAS_H + baseline);
+}
+
 function redraw() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  for (const s of state.strokes.values()) {
-    for (let i = 0; i < s.pts.length; i++) drawSegment(s, s.pts[i - 1] ?? s.pts[i], s.pts[i]);
-  }
+  ctx.fillStyle = ERASER_COLOR;
+  ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
+  for (const s of room.strokes.values()) drawFrom(s, 0);
 }
 
 function resize() {
-  const wrap = $("#stage-wrap");
-  const style = getComputedStyle(wrap);
-  const availW = wrap.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
-  const availH = wrap.clientHeight - parseFloat(style.paddingTop) - parseFloat(style.paddingBottom);
-  let w = availW;
-  let h = w / ASPECT;
-  if (availH > 0 && h > availH) {
-    h = availH;
-    w = h * ASPECT;
-  }
+  // The card hugs the canvas, so the space to fit into is the workspace's.
+  const space = $(".workspace");
+  if (!space.clientWidth) return; // the room is hidden
+  const stacked = getComputedStyle($(".workspace-row")).flexDirection === "column";
+  let w = space.clientWidth - CARD_BORDERS - (stacked ? 0 : MIN_PANEL + GAP);
+  const availH = stacked ? Infinity : space.clientHeight - CARD_BORDERS;
+  if (w / ASPECT > availH) w = availH * ASPECT;
   w = Math.max(200, Math.floor(w));
-  h = Math.floor(w / ASPECT);
-  const dpr = window.devicePixelRatio || 1;
+  const h = Math.floor(w / ASPECT);
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
-  canvas.width = Math.round(w * dpr);
-  canvas.height = Math.round(h * dpr);
-  redraw();
+  $(".members").style.height = stacked ? "" : `${h + CARD_BORDERS}px`;
 }
 
-window.addEventListener("resize", () => { if (state.code) resize(); });
+// The space also changes when the toolbar wraps or the closed banner appears.
+new ResizeObserver(resize).observe($(".workspace"));
 
-function normalize(e) {
-  const r = canvas.getBoundingClientRect();
-  const clamp = (v) => Math.round(Math.min(1, Math.max(0, v)) * 1e4) / 1e4;
-  return [clamp((e.clientX - r.left) / r.width), clamp((e.clientY - r.top) / r.height)];
+const pointOf = (e) => normalizePoint(e.clientX, e.clientY, canvas.getBoundingClientRect());
+
+const canDraw = () => !state.closed && state.ws?.readyState === WebSocket.OPEN;
+
+// placed finishes a fill or text: it is whole from the start, unlike a stroke.
+function placed(made) {
+  if (!made) return;
+  sendAll(made.msgs);
+  drawFrom(made.stroke, 0);
+  brush.markUsed();
+  renderBrush();
 }
 
 canvas.addEventListener("pointerdown", (e) => {
-  if (!state.me || state.closed || state.ws?.readyState !== WebSocket.OPEN || e.button !== 0) return;
+  if (!canDraw() || e.button !== 0) return;
+  if (brush.tool === "text") return; // the click that follows opens the editor
+  if (brush.tool === "fill") {
+    placed(room.startFill(pointOf(e), brush.color));
+    return;
+  }
+  const started = room.startStroke(pointOf(e), brush.strokeColor, brush.width);
+  if (!started) return;
   canvas.setPointerCapture(e.pointerId);
-  const localId = `s${++state.seq}`;
-  const id = `${state.me.id}:${localId}`;
-  const s = { color: $("#color").value, width: Number($("#width").value), pts: [] };
-  state.strokes.set(id, s);
-  send({ type: "stroke_start", id: localId, color: s.color, width: s.width });
-  state.current = { id, localId, pending: [] };
-  const p = normalize(e);
-  addPoint(s, p);
-  state.current.pending.push(p);
+  brush.markUsed();
+  renderBrush();
+  sendAll(started.msgs);
+  drawFrom(started.stroke, 0);
 });
 
 canvas.addEventListener("pointermove", (e) => {
-  const p = normalize(e);
+  const p = pointOf(e);
   const now = performance.now();
   if (now - state.lastCursor > CURSOR_MS) {
     state.lastCursor = now;
     send({ type: "cursor", pos: p });
   }
-  const cur = state.current;
-  if (!cur) return;
-  const s = state.strokes.get(cur.id);
-  if (!s) return;
-  addPoint(s, p);
-  cur.pending.push(p);
+  const added = room.addPoint(p);
+  if (added) drawFrom(added.stroke, added.from);
 });
 
-function endStroke() {
-  if (!state.current) return;
-  flush();
-  send({ type: "stroke_end", id: state.current.localId });
-  state.current = null;
+// ---------- text ----------
+
+const textInput = $("#text-input");
+textInput.maxLength = MAX_TEXT_LENGTH;
+let textDraft = null; // {pos, color, width} while the editor is open
+
+// A click, not pointerdown: an open editor must first lose focus and commit.
+canvas.addEventListener("click", (e) => {
+  if (brush.tool !== "text" || !canDraw()) return;
+  const pos = pointOf(e);
+  textDraft = { pos, color: brush.color, width: brush.width };
+  textInput.value = "";
+  textInput.style.left = `${pos[0] * 100}%`;
+  textInput.style.top = `${pos[1] * 100}%`;
+  textInput.style.color = textDraft.color;
+  textInput.style.fontSize = `${(textSize(textDraft.width) * canvas.clientWidth) / REF_WIDTH}px`;
+  textInput.hidden = false;
+  textInput.focus();
+});
+
+function closeText() {
+  textDraft = null;
+  textInput.hidden = true;
 }
 
+function commitText() {
+  if (!textDraft) return;
+  const { pos, color, width } = textDraft;
+  const text = textInput.value.trim();
+  closeText();
+  if (text && canDraw()) placed(room.addText(pos, text, color, width));
+}
+
+textInput.addEventListener("blur", commitText);
+textInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") commitText();
+  if (e.key === "Escape") closeText();
+});
+
+const endStroke = () => sendAll(room.endStroke());
 canvas.addEventListener("pointerup", endStroke);
 canvas.addEventListener("pointercancel", endStroke);
 
-function flush() {
-  const cur = state.current;
-  if (!cur) return;
-  while (cur.pending.length) {
-    send({ type: "stroke_points", id: cur.localId, pts: cur.pending.splice(0, MAX_POINTS_PER_MSG) });
-  }
-}
-
-setInterval(flush, FLUSH_MS);
+setInterval(() => sendAll(room.flush()), FLUSH_MS);
 
 $("#undo").addEventListener("click", () => send({ type: "undo" }));
 $("#clear").addEventListener("click", () => {
   if (confirm("Очистити полотно для всіх?")) send({ type: "clear" });
 });
 document.addEventListener("keydown", (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && state.code) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z" && state.code && e.target !== textInput) {
     e.preventDefault();
     send({ type: "undo" });
   }
 });
+
+// ---------- brush ----------
+
+function swatch(label) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "swatch";
+  button.setAttribute("aria-label", label);
+  button.append(document.createElement("span"));
+  return button;
+}
+
+const setDot = (button, color) => button.firstChild.style.setProperty("--dot", color);
+const setPressed = (button, on) => button.setAttribute("aria-pressed", String(on));
+
+// Controls are built once and updated in place so keyboard focus survives.
+const paletteButtons = PALETTE.map(({ hex, name }) => {
+  const button = swatch(name);
+  setDot(button, hex);
+  button.addEventListener("click", () => { brush.pick(hex); renderBrush(); });
+  $("#palette").append(button);
+  return { button, hex };
+});
+
+const recentButtons = Array.from({ length: MAX_RECENTS }, (_, i) => {
+  const button = swatch("");
+  button.addEventListener("click", () => { brush.pick(brush.recents[i]); renderBrush(); });
+  $("#recents").append(button);
+  return button;
+});
+
+$("#width").min = MIN_WIDTH;
+$("#width").max = MAX_WIDTH;
+$("#width").addEventListener("input", (e) => { brush.setWidth(Number(e.target.value)); renderBrush(); });
+
+const toolButtons = [...document.querySelectorAll("[data-tool]")];
+for (const button of toolButtons) {
+  button.addEventListener("click", () => { brush.setTool(button.dataset.tool); renderBrush(); });
+}
+
+function renderBrush() {
+  const { color, eraser, recents, hsv } = brush;
+  const pen = (c) => !eraser && c === color;
+  for (const { button, hex } of paletteButtons) setPressed(button, pen(hex));
+  recentButtons.forEach((button, i) => {
+    const c = recents[i];
+    button.disabled = !c;
+    button.setAttribute("aria-label", c ? `Останній колір ${c}` : "Порожній слот");
+    setDot(button, c ?? "none");
+    setPressed(button, Boolean(c) && pen(c));
+  });
+  for (const button of toolButtons) setPressed(button, !eraser && button.dataset.tool === brush.tool);
+  setPressed($("#eraser"), eraser);
+  $("#width").value = brush.width;
+  $("#width-value").textContent = brush.width;
+  canvas.dataset.tool = brush.tool;
+
+  const style = $("#room").style;
+  style.setProperty("--current", color);
+  style.setProperty("--sv-hue", hsvToHex({ h: hsv.h, s: 1, v: 1 }));
+  $("#saturation").style.setProperty(
+    "--track",
+    `linear-gradient(to right, ${hsvToHex({ ...hsv, s: 0 })}, ${hsvToHex({ ...hsv, s: 1 })})`,
+  );
+  $("#sv-marker").style.left = `${hsv.s * 100}%`;
+  $("#sv-marker").style.top = `${(1 - hsv.v) * 100}%`;
+  $("#preview-hex").textContent = color;
+  $("#hue").value = hsv.h;
+  $("#saturation").value = hsv.s * 100;
+  $("#brightness").value = hsv.v * 100;
+}
+
+function pickFromSquare(e) {
+  const r = $("#sv").getBoundingClientRect();
+  const clamp = (v) => Math.min(1, Math.max(0, v));
+  brush.setHsv({ s: clamp((e.clientX - r.left) / r.width), v: 1 - clamp((e.clientY - r.top) / r.height) });
+  renderBrush();
+}
+
+$("#sv").addEventListener("pointerdown", (e) => {
+  $("#sv").setPointerCapture(e.pointerId);
+  pickFromSquare(e);
+});
+$("#sv").addEventListener("pointermove", (e) => {
+  if ($("#sv").hasPointerCapture(e.pointerId)) pickFromSquare(e);
+});
+
+for (const [id, read] of [
+  ["#hue", (v) => ({ h: v })],
+  ["#saturation", (v) => ({ s: v / 100 })],
+  ["#brightness", (v) => ({ v: v / 100 })],
+]) {
+  $(id).addEventListener("input", (e) => { brush.setHsv(read(Number(e.target.value))); renderBrush(); });
+}
+
+$("#eraser").addEventListener("click", () => { brush.toggleEraser(); renderBrush(); });
+
+renderBrush();
 
 // ---------- members & cursors ----------
 
 function renderMembers() {
   const list = $("#members");
   list.replaceChildren();
-  for (const [id, { name, creator }] of state.members) {
+  for (const [id, { name, creator }] of room.members) {
     const li = document.createElement("li");
-    li.textContent = name + (creator ? " ★" : "") + (id === state.me?.id ? " (ви)" : "");
-    if (creator) li.title = "Творець кімнати";
-    if (id === state.me?.id) li.className = "me";
+    const avatar = document.createElement("span");
+    avatar.className = "avatar";
+    avatar.textContent = initial(name);
+    avatar.style.setProperty("--tint", memberTint(id));
+    avatar.setAttribute("aria-hidden", "true");
+    const label = document.createElement("span");
+    label.className = "member-name";
+    label.textContent = name;
+    label.title = name;
+    const note = document.createElement("span");
+    note.className = "helper";
+    note.textContent = [id === room.me?.id && "ви", creator && "творець"].filter(Boolean).join(", ");
+    const text = document.createElement("span");
+    text.className = "member-text";
+    text.append(label, note);
+    li.append(avatar, text);
     list.append(li);
   }
+  $("#member-count").textContent = `${room.members.size} з ${MAX_MEMBERS}`;
 }
 
-function moveCursor(id, pos) {
+function moveCursor({ id, pos, name }) {
   let c = state.cursors.get(id);
   if (!c) {
-    const el = document.createElement("div");
-    el.className = "cursor";
-    const label = document.createElement("span");
-    el.append(label);
+    const el = $("#cursor-template").content.firstElementChild.cloneNode(true);
+    el.style.color = memberColor(id);
     $("#cursors").append(el);
-    c = { el, label, timer: 0 };
+    c = { el, label: el.querySelector("span"), timer: 0 };
     state.cursors.set(id, c);
   }
-  c.label.textContent = state.members.get(id)?.name ?? "?";
+  c.label.textContent = name;
   c.el.style.left = `${pos[0] * 100}%`;
   c.el.style.top = `${pos[1] * 100}%`;
   c.el.style.opacity = "1";
@@ -460,21 +631,18 @@ function removeCursor(id) {
 
 // ---------- room lifetime ----------
 
-const WARN_MS = 5 * 60 * 1000;
-
 setInterval(() => {
   const el = $("#countdown");
-  const left = state.deadline - performance.now();
-  if (!state.code || state.closed || !state.welcomed || left > WARN_MS) {
-    el.hidden = true;
-    return;
-  }
-  const secs = Math.max(0, Math.ceil(left / 1000));
-  el.textContent = `Кімната закриється через ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-  el.hidden = false;
+  const text = state.code && !state.closed && state.welcomed ? room.countdown(performance.now()) : null;
+  el.hidden = text === null;
+  if (text !== null) el.textContent = text;
 }, 1000);
 
 // ---------- misc ----------
+
+// Texts are drawn on the canvas, which does not wait for the web font.
+document.fonts.load("16px Manrope", "Аa").then(redraw);
+redraw();
 
 function setStatus(text) {
   $("#status").textContent = text;
@@ -493,5 +661,5 @@ function toast(text) {
 const linked = location.hash.slice(1).toUpperCase();
 if (linked) {
   $("#code").value = linked;
-  checkRoom(linked).then((problem) => (problem ? showLobby(problem.text) : enterRoom(linked)));
+  joinRoom(linked);
 }

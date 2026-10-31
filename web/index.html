@@ -3,54 +3,209 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Drawing Rooms</title>
+  <title>Малюємо разом</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <main id="lobby" class="lobby">
-    <h1>Drawing Rooms</h1>
-    <p class="hint">Малюйте разом у реальному часі. Створіть кімнату й поділіться кодом.</p>
-    <label>Ваше ім'я
-      <input id="name" maxlength="20" autocomplete="nickname" placeholder="Гість">
-    </label>
-    <button id="create" class="primary">Створити кімнату</button>
-    <form id="join-form" class="join">
-      <input id="code" maxlength="5" placeholder="КОД" autocomplete="off" spellcheck="false">
-      <button type="submit">Приєднатися</button>
-    </form>
-    <p id="lobby-error" class="error" role="alert"></p>
+  <main id="lobby" class="center">
+    <div class="card lobby">
+      <div class="logo" aria-hidden="true">
+        <svg class="icon" width="24" height="24" viewBox="0 0 24 24"><path d="M3 17c2-1 2-3 4-4s2 2 4 1 2-5 4-6 3 0 6-1"/></svg>
+      </div>
+      <div class="intro">
+        <h1>Малюємо разом</h1>
+        <p class="muted">Створіть кімнату або приєднайтеся за кодом, щоб малювати разом у реальному часі.</p>
+      </div>
+      <div class="field">
+        <label for="name">Ваше ім'я</label>
+        <input id="name" maxlength="20" autocomplete="nickname" placeholder="Гість" aria-describedby="name-help">
+        <p id="name-help" class="helper">До 20 символів. Ми запам'ятаємо його в цьому браузері.</p>
+      </div>
+      <button id="create" class="btn primary">Створити кімнату</button>
+      <div class="or" aria-hidden="true"><span>або</span></div>
+      <form id="join-form" class="field">
+        <label for="code">Код кімнати</label>
+        <div class="join">
+          <input id="code" maxlength="5" placeholder="K7QXM" autocomplete="off" autocapitalize="characters" spellcheck="false">
+          <button type="submit" class="btn secondary">Приєднатися</button>
+        </div>
+      </form>
+      <p id="lobby-error" class="error" role="alert"></p>
+    </div>
   </main>
 
-  <section id="room" class="room" hidden>
-    <header class="toolbar">
-      <button id="copy" class="code" title="Скопіювати посилання"></button>
-      <input id="color" class="tool" type="color" value="#1d3557" title="Колір">
-      <input id="width" class="tool" type="range" min="1" max="50" value="6" title="Товщина">
-      <button id="undo" class="tool" title="Скасувати (Ctrl+Z)">Скасувати</button>
-      <button id="clear" class="tool">Очистити</button>
-      <span id="status" class="status"></span>
-      <span id="countdown" class="countdown" role="timer" hidden></span>
-      <button id="leave">Вийти</button>
+  <main id="connecting" class="center" hidden>
+    <div class="card state narrow" role="status">
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="state-text">
+        <h1>Підключаємося до кімнати</h1>
+        <p class="room-code room-ref"></p>
+        <p class="muted">Завантажуємо поточний малюнок. Це займе кілька секунд.</p>
+      </div>
+      <button id="cancel" class="btn secondary">Скасувати</button>
+    </div>
+  </main>
+
+  <main id="not-found" class="center" hidden>
+    <div class="card state" role="alert">
+      <div class="state-icon" aria-hidden="true">
+        <svg class="icon" width="28" height="28" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="7.5"/><path d="m16 16 5 5M8 8l5 5M13 8l-5 5"/></svg>
+      </div>
+      <div class="state-text">
+        <h1>Кімнату не знайдено</h1>
+        <p class="muted">Кімнати з кодом <strong class="room-ref"></strong> немає. Перевірте код ще раз. Можливо, кімната вже закрилася, бо в ній нікого не залишилось.</p>
+      </div>
+      <div class="state-actions">
+        <button id="other-code" class="btn primary">Ввести інший код</button>
+        <button class="btn secondary create-new">Створити нову кімнату</button>
+      </div>
+    </div>
+  </main>
+
+  <main id="full" class="center" hidden>
+    <div class="card state" role="alert">
+      <div id="seats" class="seats" aria-hidden="true"></div>
+      <div class="state-text">
+        <h1>Кімната заповнена</h1>
+        <p class="muted">У кімнаті <strong class="room-ref"></strong> уже <span id="full-count"></span> учасників. Зачекайте, поки хтось вийде, або створіть власну кімнату.</p>
+      </div>
+      <div class="state-actions">
+        <button id="retry" class="btn primary">Спробувати ще раз</button>
+        <button class="btn secondary create-new">Створити нову кімнату</button>
+      </div>
+    </div>
+  </main>
+
+  <section id="room" class="room" aria-labelledby="room-title" hidden>
+    <h1 id="room-title" class="sr-only">Кімната для малювання</h1>
+    <header class="card toolbar">
+      <div class="group code-group">
+        <div class="code-text">
+          <p class="caption">Код кімнати</p>
+          <p id="room-code" class="room-code"></p>
+        </div>
+        <button id="copy" class="btn-tool" title="Скопіювати посилання на кімнату">
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="3"/><path d="M5 15a2 2 0 0 1-1-2V6a2 2 0 0 1 2-2h7a2 2 0 0 1 2 2"/></svg>
+          Копіювати
+        </button>
+      </div>
+
+      <div class="group tool-group colors">
+        <div role="group" aria-labelledby="colors-title">
+          <p id="colors-title" class="caption">Кольори</p>
+          <div id="palette" class="swatches"></div>
+        </div>
+        <div role="group" aria-labelledby="recents-title">
+          <p id="recents-title" class="caption">Останні</p>
+          <div id="recents" class="swatches"></div>
+        </div>
+      </div>
+
+      <div class="group tool-group picker-group" role="group" aria-labelledby="picker-title">
+        <p id="picker-title" class="caption">Палітра</p>
+        <div class="picker">
+          <div id="sv" class="sv">
+            <input id="brightness" class="sv-input" type="range" min="0" max="100" aria-label="Яскравість">
+            <span id="sv-marker" class="sv-marker"></span>
+          </div>
+          <div class="sliders">
+            <p class="preview"><span id="preview-dot" class="preview-dot"></span><span id="preview-hex"></span></p>
+            <div class="slider">
+              <label for="hue">Колір</label>
+              <input id="hue" type="range" min="0" max="359">
+            </div>
+            <div class="slider">
+              <label for="saturation">Насиченість</label>
+              <input id="saturation" type="range" min="0" max="100">
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="group tool-group tools-group">
+        <div role="group" aria-labelledby="tool-title">
+          <p id="tool-title" class="caption">Інструмент</p>
+          <div class="tools">
+            <button class="tool-btn" data-tool="brush" aria-pressed="true">
+              <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 4a2.1 2.1 0 0 0-3 0L9 12l3 3 8-8a2.1 2.1 0 0 0 0-3Z"/><path d="M9 12c-3 0-4 2-4 4 0 1-1 2-2 2 1 2 3 3 5 3 3 0 5-2 4-6"/></svg>
+              Пензлик
+            </button>
+            <button class="tool-btn" data-tool="fill" aria-pressed="false">
+              <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="m10 3 9 9-7 7a2 2 0 0 1-3 0l-5-5a2 2 0 0 1 0-3Z"/><path d="M4 13h15"/><path d="M21 16s-2 2.500-2 4a2 2 0 0 0 4 0c0-1.500-2-4-2-4Z"/></svg>
+              Заливка
+            </button>
+            <button class="tool-btn" data-tool="text" aria-pressed="false">
+              <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7V5h14v2M12 5v14M9 19h6"/></svg>
+              Текст
+            </button>
+          </div>
+        </div>
+        <div class="slider width-slider">
+          <label for="width">Товщина</label>
+          <input id="width" type="range">
+          <output id="width-value" for="width"></output>
+        </div>
+      </div>
+
+      <div class="group actions">
+        <button id="eraser" class="btn-tool tool-group" aria-pressed="false">
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 20-3.600-3.600a2 2 0 0 1 0-2.800l9.200-9.200a2 2 0 0 1 2.800 0l5.200 5.200a2 2 0 0 1 0 2.800L13 20Z"/><path d="M20 20H7"/></svg>
+          Гумка
+        </button>
+        <button id="undo" class="btn-tool tool-group" title="Скасувати свою останню дію (Ctrl+Z)">
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/></svg>
+          Назад
+        </button>
+        <button id="clear" class="btn-tool tool-group" title="Очистити полотно для всіх">
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg>
+          Очистити
+        </button>
+        <button id="save" class="btn-tool" title="Завантажити малюнок у форматі PNG">
+          <svg class="icon" width="18" height="18" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 11l5 5 5-5M5 20h14"/></svg>
+          Зберегти
+        </button>
+      </div>
     </header>
+
     <div id="closed" class="closed" role="alert" hidden>
       <span id="closed-text"></span>
-      <button id="save-png">Зберегти PNG</button>
     </div>
+
     <div class="workspace">
+      <div class="workspace-row">
       <div id="stage-wrap" class="stage-wrap">
         <div id="stage" class="stage">
-          <canvas id="canvas"></canvas>
+          <canvas id="canvas" aria-label="Спільне полотно"></canvas>
+          <input id="text-input" class="text-entry" aria-label="Текст на полотні" autocomplete="off" hidden>
           <div id="cursors"></div>
         </div>
       </div>
-      <aside>
-        <h2>Учасники</h2>
+      <aside class="members" aria-labelledby="members-title">
+        <div class="members-head">
+          <h2 id="members-title">Учасники</h2>
+          <span id="member-count" class="helper"></span>
+        </div>
         <ul id="members"></ul>
+        <div class="members-foot">
+          <p id="status" class="helper" role="status"></p>
+          <p id="countdown" class="countdown" role="timer" hidden></p>
+          <button id="leave" class="btn secondary">Вийти</button>
+          <p id="share-hint" class="helper">Поділіться кодом, щоб запросити інших. У кімнаті до 10 людей.</p>
+        </div>
       </aside>
+      </div>
     </div>
     <div id="toast" class="toast" role="status"></div>
   </section>
 
-  <script src="app.js"></script>
+  <template id="cursor-template">
+    <div class="cursor">
+      <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true"><path d="M1 1l12 4.5-5 1.8L6 13z"/></svg>
+      <span></span>
+    </div>
+  </template>
+
+  <script type="module" src="app.js"></script>
 </body>
 </html>

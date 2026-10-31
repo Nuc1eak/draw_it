@@ -57,12 +57,17 @@ func DefaultConfig() Config {
 	}
 }
 
+// stroke is one entry of the drawing. Besides a freehand line it can be a
+// fill or a text: those have a kind, a single point, and are ended from the
+// start, so undo, clear and eviction treat them all alike.
 type stroke struct {
 	id     string
 	author string // member ID of the connection that drew it
 	owner  string // client ID, used for undo across reconnects
+	kind   string // TypeFill or TypeText; empty for a freehand line
 	color  string
 	width  float64
+	text   string
 	pts    []Point
 	ended  bool
 }
@@ -364,6 +369,21 @@ func (h *Hub) handle(in inbound) (closeRoom bool) {
 		}
 		s.ended = true
 		h.broadcast(Message{Type: TypeStrokeEnd, ID: s.id, Author: s.author}, c)
+		h.evict()
+	case TypeFill, TypeText:
+		id := c.member.ID + ":" + m.ID
+		if _, dup := h.byID[id]; dup {
+			h.sendTo(c, errorMessage("duplicate_stroke", "stroke id already used"))
+			return false
+		}
+		s := &stroke{
+			id: id, author: c.member.ID, owner: c.clientID, kind: m.Type,
+			color: m.Color, width: m.Width, text: m.Content, pts: []Point{*m.Pos}, ended: true,
+		}
+		h.strokes = append(h.strokes, s)
+		h.byID[id] = s
+		h.total++
+		h.broadcast(s.snap().shapeMessage(), c)
 		h.evict()
 	case TypeUndo:
 		for i := len(h.strokes) - 1; i >= 0; i-- {

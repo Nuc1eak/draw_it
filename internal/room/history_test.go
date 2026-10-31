@@ -35,6 +35,11 @@ func replay(t *testing.T, frames [][]byte, maxBytes int) []strokeSnap {
 				out[idx[sm.ID]].pts = append(out[idx[sm.ID]].pts, sm.Pts...)
 			case TypeStrokeEnd:
 				out[idx[sm.ID]].ended = true
+			case TypeFill, TypeText:
+				out = append(out, strokeSnap{
+					id: sm.ID, author: sm.Author, kind: sm.Type, color: sm.Color, width: sm.Width,
+					text: sm.Content, pts: []Point{*sm.Pos}, ended: true,
+				})
 			default:
 				t.Fatalf("unexpected %q in history", sm.Type)
 			}
@@ -58,8 +63,8 @@ func collect(t *testing.T, snap []strokeSnap, maxBytes int) [][]byte {
 
 func equalSnaps(a, b []strokeSnap) bool {
 	return slices.EqualFunc(a, b, func(x, y strokeSnap) bool {
-		return x.id == y.id && x.author == y.author && x.color == y.color &&
-			x.width == y.width && x.ended == y.ended && slices.Equal(x.pts, y.pts)
+		return x.id == y.id && x.author == y.author && x.kind == y.kind && x.color == y.color &&
+			x.text == y.text && x.width == y.width && x.ended == y.ended && slices.Equal(x.pts, y.pts)
 	})
 }
 
@@ -161,5 +166,17 @@ func TestSnapshotUnaffectedByLaterChanges(t *testing.T) {
 
 	if got := replay(t, <-framesCh, MaxFrameBytes); !equalSnaps(got, want) {
 		t.Fatal("snapshot changed after the hub moved on")
+	}
+}
+
+func TestWriteHistoryKeepsFillsAndTextsInOrder(t *testing.T) {
+	snap := []strokeSnap{
+		{id: "m1:s1", author: "m1", color: "#000000", width: 4, pts: []Point{{0.1, 0.1}, {0.2, 0.2}}, ended: true},
+		{id: "m1:s2", author: "m1", kind: TypeFill, color: "#ff0000", pts: []Point{{0.15, 0.15}}, ended: true},
+		{id: "m2:s1", author: "m2", kind: TypeText, color: "#00ff00", width: 6, text: "Привіт", pts: []Point{{0.5, 0.5}}, ended: true},
+		{id: "m2:s2", author: "m2", color: "#0000ff", width: 2, pts: []Point{{0.3, 0.3}}, ended: true},
+	}
+	if got := replay(t, collect(t, snap, MaxFrameBytes), MaxFrameBytes); !equalSnaps(got, snap) {
+		t.Fatalf("round trip mismatch:\n got %+v\nwant %+v", got, snap)
 	}
 }
