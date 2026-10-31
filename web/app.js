@@ -1,5 +1,7 @@
 import {
   Brush,
+  CARD_BORDERS,
+  LAYOUT_GAP,
   MAX_MEMBERS,
   MAX_RECENTS,
   MAX_TEXT_LENGTH,
@@ -22,6 +24,7 @@ import {
   randomId,
   roomProblem,
   textSize,
+  toolbarLayout,
 } from "./room.js";
 
 // The canvas has one fixed resolution for everyone, so normalized coordinates
@@ -31,9 +34,6 @@ const CANVAS_W = 2000;
 const CANVAS_H = 1250;
 const ASPECT = CANVAS_W / CANVAS_H;
 const REF_WIDTH = 1000;
-const MIN_PANEL = 190; // keep in sync with .members in style.css
-const GAP = 12;
-const CARD_BORDERS = 2;
 const TEXT_LINE_HEIGHT = 1.2; // keep in sync with .text-entry in style.css
 const FLUSH_MS = 30;
 const CURSOR_MS = 50;
@@ -222,7 +222,9 @@ function setClosed(closed) {
 }
 
 function updateLeaveButton() {
-  $("#leave").textContent = leaveLabel({ closed: state.closed, creator: room.me?.creator ?? false });
+  const label = leaveLabel({ closed: state.closed, creator: room.me?.creator ?? false });
+  $("#leave").setAttribute("aria-label", label);
+  $("#leave").title = label;
 }
 
 $("#save").addEventListener("click", () => {
@@ -369,14 +371,18 @@ function resize() {
   const space = $(".workspace");
   if (!space.clientWidth) return; // the room is hidden
   const stacked = getComputedStyle($(".workspace-row")).flexDirection === "column";
-  let w = space.clientWidth - CARD_BORDERS - (stacked ? 0 : MIN_PANEL + GAP);
-  const availH = stacked ? Infinity : space.clientHeight - CARD_BORDERS;
-  if (w / ASPECT > availH) w = availH * ASPECT;
-  w = Math.max(200, Math.floor(w));
-  const h = Math.floor(w / ASPECT);
+  const toolbar = $("#toolbar").style;
+  let w = space.clientWidth - CARD_BORDERS;
+  let h = Math.floor(w / ASPECT);
+  if (!stacked) {
+    const layout = toolbarLayout(space.clientWidth, space.clientHeight);
+    w = layout.canvasW;
+    h = layout.canvasH;
+    toolbar.setProperty("--toolbar-w", `${layout.toolbarW}px`);
+    toolbar.setProperty("--ui", layout.scale);
+  }
   canvas.style.width = `${w}px`;
   canvas.style.height = `${h}px`;
-  $(".members").style.height = stacked ? "" : `${h + CARD_BORDERS}px`;
 }
 
 // The space also changes when the toolbar wraps or the closed banner appears.
@@ -512,7 +518,7 @@ $("#width").min = MIN_WIDTH;
 $("#width").max = MAX_WIDTH;
 $("#width").addEventListener("input", (e) => { brush.setWidth(Number(e.target.value)); renderBrush(); });
 
-const toolButtons = [...document.querySelectorAll("[data-tool]")];
+const toolButtons = [...document.querySelectorAll(".tool-btn")];
 for (const button of toolButtons) {
   button.addEventListener("click", () => { brush.setTool(button.dataset.tool); renderBrush(); });
 }
@@ -577,6 +583,18 @@ $("#eraser").addEventListener("click", () => { brush.toggleEraser(); renderBrush
 renderBrush();
 
 // ---------- members & cursors ----------
+
+// The list opens beside the toolbar, over the canvas, and goes away by itself.
+$("#members-panel").addEventListener("beforetoggle", (e) => {
+  if (e.newState !== "open") return;
+  const panel = $("#members-panel").style;
+  const toolbar = $("#toolbar").getBoundingClientRect();
+  const stacked = getComputedStyle($(".workspace-row")).flexDirection === "column";
+  const top = stacked ? toolbar.top + LAYOUT_GAP : $("#members-toggle").getBoundingClientRect().top;
+  panel.top = `${top}px`;
+  panel.maxHeight = `${innerHeight - top - LAYOUT_GAP}px`;
+  panel.right = `${stacked ? LAYOUT_GAP : innerWidth - toolbar.left + LAYOUT_GAP}px`;
+});
 
 function renderMembers() {
   const list = $("#members");

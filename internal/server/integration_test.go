@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -592,5 +594,33 @@ func TestLateJoinerReceivesFillsAndTexts(t *testing.T) {
 	}
 	if history[1].Content != "Привіт" || history[1].Width != 8 || *history[1].Pos != pos {
 		t.Fatalf("history text = %+v", history[1])
+	}
+}
+
+func TestFrontendIsAlwaysRevalidated(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "style.css"), []byte("body {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := room.DefaultConfig()
+	ctx, cancel := context.WithCancel(context.Background())
+	reg := room.NewRegistry(ctx, cfg)
+	srv := httptest.NewServer(server.New(reg, cfg, http.Dir(dir)))
+	t.Cleanup(func() {
+		cancel()
+		reg.Wait()
+		srv.Close()
+	})
+
+	resp, err := http.Get(srv.URL + "/style.css")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Cache-Control"); got != "no-cache" {
+		t.Fatalf("Cache-Control = %q, want no-cache", got)
 	}
 }

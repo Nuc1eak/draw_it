@@ -56,7 +56,7 @@ Participant avatars use soft tints with dark text: #DCE6FF, #FFDCD4, #D8F0DE, #E
 - Spacing scale: 4, 8, 12, 16, 20, 24, 28, 40. Use `gap`, not margins, between siblings.
 - Radii: card 28px, canvas 24px, toolbar and chips 20px, inputs 14px, buttons 999px (pill), swatches 50%.
 - Control heights: text input 48px, primary button 52px, secondary button 48px,
-  toolbar buttons 40-44px, color swatch hit area 30×40px on desktop, 44px on narrow screens (visible dot 26px).
+  toolbar buttons 40-44px, color swatch hit area about 38×32px on desktop, 44px high on narrow screens (visible dot 26px).
   Minimum hit target is 40px on desktop toolbar, 44px everywhere else.
 - Page padding 16px in the room, 32px on centered cards. Centered cards max-width 400-440px.
 
@@ -71,14 +71,20 @@ Participant avatars use soft tints with dark text: #DCE6FF, #FFDCD4, #D8F0DE, #E
 
 ## Room screen layout
 
-- Header row (wraps): room code chip with copy button, then toolbar card.
-- Toolbar groups, left to right: Colors (10 defaults over 10 recents), Palette picker,
-  Tool (Brush, Fill, Text) with a Width slider below, actions (Eraser, Undo, Clear, Save).
-  Groups separated by 1px dividers.
-- Body row: the canvas keeps 16:10 and its card takes exactly its size; participants panel
-  on the right, at least 190px, takes the rest and stacks below the canvas on narrow screens.
-- On desktop the page fits the window and never scrolls; a long participants list scrolls
-  inside its panel.
+- One row: the canvas and a vertical toolbar on its right. The canvas keeps 16:10 and takes as
+  much room as it can; the toolbar takes the width left, from 220px up to a limit on ultrawide
+  windows, and its contents scale with the window. Spare height goes to the palette square.
+  On narrow screens the toolbar stacks below the canvas.
+- Toolbar groups, top to bottom: room code with copy and leave (or close room) buttons,
+  participants dropdown, Colors (10 defaults over 10 recents), Palette picker, Tool (Brush, Fill,
+  Text) with a Width slider below, actions (Eraser, Undo, Clear, Save). Groups separated by
+  1px dividers.
+- Tool and action buttons show icons only, with `aria-label` and a `title` tooltip.
+- The participants dropdown lists members; it opens over the canvas beside the toolbar and
+  closes on a click outside or Esc.
+- The canvas card takes exactly the canvas size.
+- On desktop the page fits the window and never scrolls; the toolbar and the participants
+  list scroll inside themselves if they do not fit.
 - Other users' cursors: arrow in their color with a dark name pill, pointer-events none.
 
 ## Color behavior

@@ -5,12 +5,19 @@ import { webcrypto } from "node:crypto";
 import {
   AVATAR_TINTS,
   Brush,
+  CANVAS_ASPECT,
+  CARD_BORDERS,
   DEFAULT_WIDTH,
   ERASER_COLOR,
+  LAYOUT_GAP,
   MAX_POINTS_PER_MSG,
   MAX_RECENTS,
   PALETTE,
   Room,
+  TOOLBAR_CONTENT_H,
+  TOOLBAR_MAX_W,
+  TOOLBAR_MIN_SCALE,
+  TOOLBAR_MIN_W,
   WARN_MS,
   closeOutcome,
   countdownText,
@@ -28,6 +35,7 @@ import {
   randomId,
   roomProblem,
   textSize,
+  toolbarLayout,
 } from "./room.js";
 
 // Mirrors clientIDRe and strokeIDRe in the Go server.
@@ -470,4 +478,40 @@ test("fills and texts from others are drawn live and from history", () => {
   assert.deepEqual([...room.strokes.keys()], ["m2:s1", "m2:s2", "m2:s3"], "drawing order is kept");
   assert.ok(room.apply({ type: "stroke_removed", ids: ["m2:s3"] }, 0).redraw);
   assert.ok(!room.strokes.has("m2:s3"));
+});
+
+test("toolbarLayout gives the canvas its 16:10 and the toolbar the rest", () => {
+  for (const [w, h] of [[1248, 819], [1888, 918], [1888, 1048], [2528, 1236], [1018, 608], [1018, 500]]) {
+    const { canvasW, canvasH, toolbarW, scale } = toolbarLayout(w, h);
+    assert.ok(Math.abs(canvasW / canvasH - CANVAS_ASPECT) < 0.01, `${w}x${h} keeps its shape`);
+    assert.ok(canvasH + CARD_BORDERS <= h, `${w}x${h} fits the height`);
+    assert.ok(scale >= TOOLBAR_MIN_SCALE, `${w}x${h} stays readable`);
+    const used = canvasW + CARD_BORDERS + LAYOUT_GAP + toolbarW * scale;
+    assert.ok(Math.abs(used - w) < 0.01, `${w}x${h} leaves no empty strip`);
+    assert.ok(TOOLBAR_CONTENT_H * scale <= h + 1, `${w}x${h} toolbar fits when scaled`);
+  }
+});
+
+test("toolbarLayout scales the toolbar down in a short window", () => {
+  const { scale } = toolbarLayout(1018, 608);
+  assert.ok(scale < 1 && scale >= TOOLBAR_MIN_SCALE);
+  assert.equal(toolbarLayout(1018, 300).scale, TOOLBAR_MIN_SCALE, "and not without limit");
+});
+
+test("toolbarLayout caps the toolbar on an ultrawide window", () => {
+  const { toolbarW, canvasH } = toolbarLayout(3408, 1268);
+  assert.equal(toolbarW, TOOLBAR_MAX_W);
+  assert.ok(canvasH >= 1264, "the canvas still takes the full height");
+});
+
+test("toolbarLayout keeps the toolbar at its base size on a laptop", () => {
+  const { scale, toolbarW } = toolbarLayout(1248, 819);
+  assert.equal(scale, 1);
+  assert.equal(toolbarW, TOOLBAR_MIN_W);
+});
+
+test("toolbarLayout grows the toolbar on a wide monitor", () => {
+  const { scale, canvasH } = toolbarLayout(2528, 1236);
+  assert.ok(scale > 1.5);
+  assert.ok(canvasH >= 1232, "the canvas takes the full height");
 });
