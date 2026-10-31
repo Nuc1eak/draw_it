@@ -3,16 +3,31 @@ import assert from "node:assert/strict";
 import { webcrypto } from "node:crypto";
 
 import {
+  AVATAR_TINTS,
+  Brush,
+  DEFAULT_WIDTH,
+  ERASER_COLOR,
   MAX_POINTS_PER_MSG,
+  MAX_RECENTS,
+  PALETTE,
   Room,
   WARN_MS,
   closeOutcome,
   countdownText,
+  floodFill,
+  hexToHsv,
+  hexToRgb,
+  hsvToHex,
+  initial,
   isRoomCode,
   leaveLabel,
+  memberColor,
+  memberTint,
   normalizePoint,
+  pushRecent,
   randomId,
   roomProblem,
+  textSize,
 } from "./room.js";
 
 // Mirrors clientIDRe and strokeIDRe in the Go server.
@@ -58,8 +73,15 @@ test("roomProblem explains why a room cannot be joined", () => {
   const info = { members: 3, capacity: 10 };
   assert.equal(roomProblem("K7QXM", 200, info), null);
   assert.deepEqual(roomProblem("K7QX0", 200, info), { text: "Невірний код кімнати.", fatal: true });
-  assert.deepEqual(roomProblem("K7QXM", 404, null), { text: "Кімнату не знайдено.", fatal: true });
-  assert.deepEqual(roomProblem("K7QXM", 200, { members: 10, capacity: 10 }), { text: "Кімната заповнена.", fatal: true });
+  assert.deepEqual(roomProblem("K7QXM", 404, null), { text: "Кімнату не знайдено.", fatal: true, screen: "not-found" });
+  assert.deepEqual(roomProblem("K7QXM", 200, { members: 10, capacity: 10 }), {
+    text: "Кімната заповнена.",
+    fatal: true,
+    screen: "full",
+    members: 10,
+    capacity: 10,
+  });
+  assert.equal(roomProblem("K7QX0", 200, info).screen, undefined, "a mistyped code stays in the lobby");
   // Transient problems let the page keep reconnecting.
   assert.equal(roomProblem("K7QXM", 503, null).fatal, false);
   assert.equal(roomProblem("K7QXM", null, null).fatal, false);
@@ -228,4 +250,224 @@ test("members, cursors and errors", () => {
   assert.equal(room.apply({ type: "cursor", memberId: "m9", pos: [0, 0] }, 0).cursor.name, "?");
 
   assert.equal(room.apply({ type: "error", code: "forbidden", msg: "nope" }, 0).error, "Помилка: nope");
+});
+
+test("hex and hsv convert both ways", () => {
+  for (const hex of [...PALETTE.map((c) => c.hex), "#000000", "#FFFFFF", "#808080"]) {
+    assert.equal(hsvToHex(hexToHsv(hex)), hex);
+  }
+  assert.deepEqual(hexToHsv("#FF0000"), { h: 0, s: 1, v: 1 });
+  assert.deepEqual(hexToHsv("#000000"), { h: 0, s: 0, v: 0 });
+  assert.deepEqual(hexToHsv("#FFFFFF"), { h: 0, s: 0, v: 1 });
+  assert.equal(hsvToHex({ h: 120, s: 1, v: 1 }), "#00FF00");
+  assert.equal(hsvToHex({ h: 360, s: 1, v: 1 }), "#FF0000");
+});
+
+test("pushRecent keeps newest first without duplicates", () => {
+  assert.deepEqual(pushRecent(["#111111", "#222222"], "#333333"), ["#333333", "#111111", "#222222"]);
+  assert.deepEqual(pushRecent(["#111111", "#222222"], "#222222"), ["#222222", "#111111"]);
+  const full = Array.from({ length: MAX_RECENTS }, (_, i) => `#00000${i}`);
+  const next = pushRecent(full, "#FFFFFF");
+  assert.equal(next.length, MAX_RECENTS);
+  assert.equal(next[0], "#FFFFFF");
+  assert.ok(!next.includes(full.at(-1)), "the oldest color falls off");
+});
+
+test("picking a color syncs the picker", () => {
+  const brush = new Brush();
+  brush.pick("#E03131");
+  assert.equal(brush.color, "#E03131");
+  assert.deepEqual(brush.hsv, hexToHsv("#E03131"));
+});
+
+test("a color reaches recents only when drawn with", () => {
+  const brush = new Brush();
+  assert.deepEqual(brush.recents, []);
+  brush.pick("#E03131");
+  brush.setHsv({ h: 10 });
+  assert.deepEqual(brush.recents, [], "choosing is not drawing");
+  brush.markUsed();
+  assert.deepEqual(brush.recents, [brush.color]);
+  const first = brush.color;
+  brush.pick("#2F9E44");
+  assert.deepEqual(brush.recents, [first]);
+  brush.markUsed();
+  assert.deepEqual(brush.recents, ["#2F9E44", first]);
+});
+
+test("erasing leaves recents alone", () => {
+  const brush = new Brush();
+  brush.toggleEraser();
+  brush.markUsed();
+  assert.deepEqual(brush.recents, []);
+});
+
+test("a color without hue keeps the picker's hue", () => {
+  const brush = new Brush();
+  brush.setHsv({ h: 200 });
+  brush.pick("#000000");
+  assert.equal(brush.hsv.h, 200);
+  brush.pick("#FFFFFF");
+  assert.equal(brush.hsv.h, 200);
+  brush.setHsv({ v: 0 });
+  assert.equal(brush.color, "#000000");
+  assert.equal(brush.hsv.h, 200, "dragging through black does not reset the hue");
+});
+
+test("the eraser paints the canvas color and any color choice ends it", () => {
+  const brush = new Brush();
+  const color = brush.color;
+  brush.toggleEraser();
+  assert.equal(brush.strokeColor, ERASER_COLOR);
+  assert.equal(brush.color, color, "the pen color survives erasing");
+  brush.toggleEraser();
+  assert.equal(brush.strokeColor, color);
+
+  brush.toggleEraser();
+  brush.pick("#2F9E44");
+  assert.equal(brush.strokeColor, "#2F9E44");
+  brush.toggleEraser();
+  brush.setHsv({ h: 10 });
+  assert.equal(brush.eraser, false);
+});
+
+test("member colors are stable and come from the palettes", () => {
+  assert.equal(memberColor("abc"), memberColor("abc"));
+  assert.ok(PALETTE.some((c) => c.hex === memberColor("abc")));
+  assert.ok(AVATAR_TINTS.includes(memberTint("abc")));
+  assert.ok(new Set(["m1", "m2", "m3", "m4", "m5"].map(memberColor)).size > 1);
+});
+
+test("initial takes the first letter of a name", () => {
+  assert.equal(initial("олена"), "О");
+  assert.equal(initial("  Їжак"), "Ї");
+  assert.equal(initial("😀 ok"), "😀");
+  assert.equal(initial("   "), "?");
+});
+
+// image builds opaque RGBA data from rows of characters, one per pixel.
+const INK = { ".": [255, 255, 255], "#": [0, 0, 0], "~": [128, 128, 128] };
+function image(rows) {
+  const w = rows[0].length;
+  const data = new Uint8ClampedArray(w * rows.length * 4).fill(255);
+  [...rows.join("")].forEach((ch, i) => data.set(INK[ch], i * 4));
+  return { data, w, h: rows.length };
+}
+const pixel = ({ data, w }, x, y) => [...data.slice((y * w + x) * 4, (y * w + x) * 4 + 3)];
+const RED = [255, 0, 0];
+
+test("floodFill stays inside a closed outline", () => {
+  const img = image([
+    ".......",
+    ".#####.",
+    ".#...#.",
+    ".#...#.",
+    ".#####.",
+    ".......",
+  ]);
+  assert.equal(floodFill(img.data, img.w, img.h, 3, 2, RED), true);
+  assert.deepEqual(pixel(img, 3, 3), RED);
+  assert.deepEqual(pixel(img, 0, 0), [255, 255, 255], "outside stays white");
+  assert.deepEqual(pixel(img, 6, 5), [255, 255, 255]);
+});
+
+test("floodFill stops at the edge of the canvas", () => {
+  const img = image([
+    "..#..",
+    "..#..",
+    "..#..",
+  ]);
+  floodFill(img.data, img.w, img.h, 0, 0, RED);
+  assert.deepEqual(pixel(img, 0, 2), RED);
+  assert.deepEqual(pixel(img, 1, 1), RED);
+  assert.deepEqual(pixel(img, 4, 0), [255, 255, 255], "columns do not wrap around");
+});
+
+test("floodFill covers the antialiased rim of a line but does not cross it", () => {
+  const img = image([
+    "...~#~...",
+    "...~#~...",
+  ]);
+  floodFill(img.data, img.w, img.h, 0, 0, RED);
+  assert.deepEqual(pixel(img, 3, 0), RED, "no pale halo along the line");
+  assert.deepEqual(pixel(img, 4, 0), [0, 0, 0]);
+  assert.deepEqual(pixel(img, 5, 0), [128, 128, 128], "the far side is untouched");
+  assert.deepEqual(pixel(img, 8, 1), [255, 255, 255]);
+});
+
+test("floodFill on a line recolors it", () => {
+  const img = image([
+    "..#..",
+    "..#..",
+  ]);
+  floodFill(img.data, img.w, img.h, 2, 0, RED);
+  assert.deepEqual(pixel(img, 2, 1), RED);
+});
+
+test("floodFill with the same color changes nothing", () => {
+  const img = image(["..", ".."]);
+  const before = [...img.data];
+  assert.equal(floodFill(img.data, img.w, img.h, 0, 0, [255, 255, 255]), false);
+  assert.deepEqual([...img.data], before);
+});
+
+test("hexToRgb reads channels", () => {
+  assert.deepEqual(hexToRgb("#1971C2"), [25, 113, 194]);
+});
+
+test("textSize grows with the width slider", () => {
+  assert.equal(textSize(1), 14);
+  assert.equal(textSize(DEFAULT_WIDTH), 24);
+  assert.equal(textSize(50), 112);
+});
+
+test("the tool switches, and the eraser and tools exclude each other", () => {
+  const brush = new Brush();
+  assert.equal(brush.tool, "brush");
+  brush.setTool("fill");
+  assert.equal(brush.tool, "fill");
+  brush.toggleEraser();
+  assert.equal(brush.tool, "brush", "the eraser is a brush");
+  assert.ok(brush.eraser);
+  brush.setTool("text");
+  assert.equal(brush.eraser, false);
+  assert.equal(brush.strokeColor, brush.color);
+});
+
+test("own fills and texts produce messages the server accepts", () => {
+  const room = joined();
+  const fill = room.startFill([0.1, 0.2], "#123456");
+  assert.deepEqual(fill.msgs, [{ type: "fill", pos: [0.1, 0.2], color: "#123456", id: "s1" }]);
+  assert.equal(fill.stroke.kind, "fill");
+
+  const text = room.addText([0.3, 0.4], "Привіт", "#654321", 8);
+  assert.deepEqual(text.msgs, [{ type: "text", pos: [0.3, 0.4], color: "#654321", width: 8, text: "Привіт", id: "s2" }]);
+  assert.deepEqual(room.strokes.get("m1:s2"), { kind: "text", color: "#654321", width: 8, text: "Привіт", pts: [[0.3, 0.4]] });
+  assert.equal(room.startStroke([0, 0], "#000000", 1).msgs[0].id, "s3", "all share one ID sequence");
+});
+
+test("no own fill or text before the welcome", () => {
+  const room = new Room();
+  assert.equal(room.startFill([0, 0], "#000000"), null);
+  assert.equal(room.addText([0, 0], "a", "#000000", 6), null);
+});
+
+test("fills and texts from others are drawn live and from history", () => {
+  const room = joined();
+  const live = room.apply({ type: "fill", id: "m2:s1", author: "m2", color: "#ff0000", pos: [0.5, 0.5] }, 0);
+  assert.equal(live.draws[0].stroke.kind, "fill");
+  assert.equal(live.draws[0].from, 0);
+
+  const fx = room.apply({
+    type: "history",
+    msgs: [
+      { type: "stroke_start", id: "m2:s2", color: "#000000", width: 2 },
+      { type: "stroke_points", id: "m2:s2", pts: [[0, 0]] },
+      { type: "text", id: "m2:s3", color: "#00ff00", width: 6, text: "ок", pos: [0.1, 0.1] },
+    ],
+  }, 0);
+  assert.equal(fx.draws.at(-1).stroke.text, "ок");
+  assert.deepEqual([...room.strokes.keys()], ["m2:s1", "m2:s2", "m2:s3"], "drawing order is kept");
+  assert.ok(room.apply({ type: "stroke_removed", ids: ["m2:s3"] }, 0).redraw);
+  assert.ok(!room.strokes.has("m2:s3"));
 });

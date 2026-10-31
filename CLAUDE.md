@@ -1,5 +1,6 @@
 # Project
 Realtime collaborative drawing rooms. Go backend, WebSocket, vanilla JS + canvas frontend in /web.
+@DESIGN.md
 
 # Commands
 - Run: go run ./cmd/server

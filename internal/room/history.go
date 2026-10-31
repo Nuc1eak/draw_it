@@ -17,21 +17,28 @@ const historyPointsPerMsg = 500
 // pts shares its backing array with the live stroke: the hub only appends
 // past len(pts), so the elements seen here never change.
 type strokeSnap struct {
-	id, author, color string
-	width             float64
-	pts               []Point
-	ended             bool
+	id, author, kind, color, text string
+	width                         float64
+	pts                           []Point
+	ended                         bool
 }
 
 func (s *stroke) snap() strokeSnap {
 	return strokeSnap{
 		id:     s.id,
 		author: s.author,
+		kind:   s.kind,
 		color:  s.color,
+		text:   s.text,
 		width:  s.width,
 		pts:    s.pts[:len(s.pts):len(s.pts)],
 		ended:  s.ended,
 	}
+}
+
+// shapeMessage is the single message that carries a fill or a text.
+func (s strokeSnap) shapeMessage() Message {
+	return Message{Type: s.kind, ID: s.id, Author: s.author, Color: s.color, Width: s.width, Content: s.text, Pos: &s.pts[0]}
 }
 
 var (
@@ -77,6 +84,12 @@ func writeHistory(snap []strokeSnap, maxBytes int, emit func([]byte) error) erro
 	}
 
 	for _, s := range snap {
+		if s.kind != "" {
+			if err := add(s.shapeMessage()); err != nil {
+				return err
+			}
+			continue
+		}
 		start := Message{Type: TypeStrokeStart, ID: s.id, Author: s.author, Color: s.color, Width: s.width}
 		if err := add(start); err != nil {
 			return err

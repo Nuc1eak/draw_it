@@ -607,3 +607,105 @@ func TestDefaultConfigMatchesAgreedLimits(t *testing.T) {
 		t.Fatalf("DefaultConfig() = %+v\nwant %+v", got, want)
 	}
 }
+
+func fillMsg(id string) Message {
+	return Message{Type: TypeFill, ID: id, Color: "#ff0000", Pos: &Point{0.5, 0.25}}
+}
+
+func textMsg(id, text string) Message {
+	return Message{Type: TypeText, ID: id, Color: "#00ff00", Width: 6, Content: text, Pos: &Point{0.1, 0.2}}
+}
+
+func TestHubRelaysFillsAndTextsToOthersOnly(t *testing.T) {
+	h, _ := startHub(t, testConfig())
+	a, b := join(t, h, "A", "client-a1"), join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	send(t, a, fillMsg("s1"))
+	got := recv(t, b)
+	if got.Type != TypeFill || got.ID != a.member.ID+":s1" || got.Author != a.member.ID ||
+		got.Color != "#ff0000" || *got.Pos != (Point{0.5, 0.25}) {
+		t.Fatalf("fill = %+v", got)
+	}
+	send(t, a, textMsg("s2", "Привіт"))
+	got = recv(t, b)
+	if got.Type != TypeText || got.ID != a.member.ID+":s2" || got.Content != "Привіт" || got.Width != 6 {
+		t.Fatalf("text = %+v", got)
+	}
+	expectQuiet(t, a, b)
+}
+
+func TestHubLateJoinerGetsFillsAndTexts(t *testing.T) {
+	h, _ := startHub(t, testConfig())
+	a := join(t, h, "A", "client-a1")
+	draw(t, a, "s1", line(3, 0), true)
+	send(t, a, fillMsg("s2"))
+	send(t, a, textMsg("s3", "Текст"))
+	if _, err := h.Members(); err != nil { // the hub has handled everything above
+		t.Fatal(err)
+	}
+
+	late := join(t, h, "B", "client-b1")
+	if len(late.snapshot) != 3 {
+		t.Fatalf("snapshot has %d entries, want 3", len(late.snapshot))
+	}
+	fill, text := late.snapshot[1], late.snapshot[2]
+	if fill.kind != TypeFill || !fill.ended || len(fill.pts) != 1 {
+		t.Fatalf("fill = %+v", fill)
+	}
+	if text.kind != TypeText || text.text != "Текст" || text.width != 6 {
+		t.Fatalf("text = %+v", text)
+	}
+}
+
+func TestHubUndoAndClearCoverFillsAndTexts(t *testing.T) {
+	h, _ := startHub(t, testConfig())
+	a, b := join(t, h, "A", "client-a1"), join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+
+	send(t, a, fillMsg("s1"))
+	recvType(t, b, TypeFill)
+	send(t, a, textMsg("s2", "x"))
+	recvType(t, b, TypeText)
+	send(t, a, Message{Type: TypeUndo})
+	if got := recvType(t, b, TypeStrokeRemoved); !slices.Equal(got.IDs, []string{a.member.ID + ":s2"}) {
+		t.Fatalf("undo removed %v", got.IDs)
+	}
+	send(t, a, Message{Type: TypeUndo})
+	if got := recvType(t, b, TypeStrokeRemoved); !slices.Equal(got.IDs, []string{a.member.ID + ":s1"}) {
+		t.Fatalf("undo removed %v", got.IDs)
+	}
+
+	send(t, a, fillMsg("s3"))
+	recvType(t, b, TypeFill)
+	send(t, a, Message{Type: TypeClear})
+	recvType(t, b, TypeCleared)
+	if late := join(t, h, "C", "client-c1"); len(late.snapshot) != 0 {
+		t.Fatalf("snapshot after clear has %d entries", len(late.snapshot))
+	}
+}
+
+func TestHubRejectsDuplicateFillID(t *testing.T) {
+	h, _ := startHub(t, testConfig())
+	a := join(t, h, "A", "client-a1")
+	send(t, a, fillMsg("s1"))
+	send(t, a, textMsg("s1", "x"))
+	if got := recvType(t, a, TypeError); got.Code != "duplicate_stroke" {
+		t.Fatalf("error = %+v", got)
+	}
+}
+
+func TestHubEvictsFillsWithStrokes(t *testing.T) {
+	cfg := testConfig()
+	cfg.MaxPoints = 2
+	h, _ := startHub(t, cfg)
+	a, b := join(t, h, "A", "client-a1"), join(t, h, "B", "client-b1")
+	recvType(t, a, TypeMemberJoined)
+	for _, id := range []string{"s1", "s2", "s3"} {
+		send(t, a, fillMsg(id))
+		recvType(t, b, TypeFill)
+	}
+	if got := recvType(t, b, TypeStrokeRemoved); !slices.Equal(got.IDs, []string{a.member.ID + ":s1"}) {
+		t.Fatalf("evicted %v", got.IDs)
+	}
+}

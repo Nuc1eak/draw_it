@@ -566,3 +566,31 @@ func TestInboundMessageLimit(t *testing.T) {
 		t.Fatalf("member_left %q, want %q", m.MemberID, a.me.ID)
 	}
 }
+
+func TestLateJoinerReceivesFillsAndTexts(t *testing.T) {
+	ts := newTestServer(t, room.DefaultConfig())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	code := ts.createRoom(t)
+	a, _ := ts.connect(t, ctx, code, "Alice")
+	b, _ := ts.connect(t, ctx, code, "Bob")
+	a.readType(ctx, room.TypeMemberJoined)
+
+	pos := room.Point{0.25, 0.5}
+	a.write(ctx, room.Message{Type: room.TypeFill, ID: "s1", Color: "#ff0000", Pos: &pos})
+	a.write(ctx, room.Message{Type: room.TypeText, ID: "s2", Color: "#00ff00", Width: 8, Content: "Привіт", Pos: &pos})
+	if m := b.readType(ctx, room.TypeFill); m.Author != a.me.ID || m.Color != "#ff0000" || *m.Pos != pos {
+		t.Fatalf("live fill = %+v", m)
+	}
+	if m := b.readType(ctx, room.TypeText); m.Content != "Привіт" {
+		t.Fatalf("live text = %+v", m)
+	}
+
+	_, history := ts.connect(t, ctx, code, "Carol")
+	if len(history) != 2 || history[0].Type != room.TypeFill || history[1].Type != room.TypeText {
+		t.Fatalf("history = %+v", history)
+	}
+	if history[1].Content != "Привіт" || history[1].Width != 8 || *history[1].Pos != pos {
+		t.Fatalf("history text = %+v", history[1])
+	}
+}

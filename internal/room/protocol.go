@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math"
 	"regexp"
+	"strings"
+	"unicode/utf8"
 )
 
 // Message types exchanged over the WebSocket.
@@ -12,6 +14,8 @@ const (
 	TypeStrokeStart   = "stroke_start"
 	TypeStrokePoints  = "stroke_points"
 	TypeStrokeEnd     = "stroke_end"
+	TypeFill          = "fill"
+	TypeText          = "text"
 	TypeUndo          = "undo"
 	TypeClear         = "clear"
 	TypeCursor        = "cursor"
@@ -31,6 +35,7 @@ const (
 	MaxPointsPerMessage = 500
 	MinWidth            = 1
 	MaxWidth            = 50
+	MaxTextRunes        = 200
 )
 
 // Point is a coordinate normalized to [0,1] on both axes.
@@ -58,6 +63,7 @@ type Message struct {
 	Members  []Member  `json:"members,omitempty"`
 	IDs      []string  `json:"ids,omitempty"`
 	Msgs     []Message `json:"msgs,omitempty"`
+	Content  string    `json:"text,omitempty"`
 	// ExpiresIn is the time left until MaxLifetime, in milliseconds. It is
 	// relative so that clients with a skewed clock still count down correctly.
 	ExpiresIn int64  `json:"expiresIn,omitempty"`
@@ -113,6 +119,28 @@ func validateInbound(m *Message) error {
 		}
 	case TypeStrokeEnd:
 		return validateStrokeID(m.ID)
+	case TypeFill:
+		if err := validateStrokeID(m.ID); err != nil {
+			return err
+		}
+		if !colorRe.MatchString(m.Color) {
+			return &protoError{"bad_color", "color must be #rrggbb"}
+		}
+		return validatePos(m)
+	case TypeText:
+		if err := validateStrokeID(m.ID); err != nil {
+			return err
+		}
+		if !colorRe.MatchString(m.Color) {
+			return &protoError{"bad_color", "color must be #rrggbb"}
+		}
+		if m.Width < MinWidth || m.Width > MaxWidth {
+			return &protoError{"bad_width", fmt.Sprintf("width must be in [%d,%d]", MinWidth, MaxWidth)}
+		}
+		if !utf8.ValidString(m.Content) || strings.TrimSpace(m.Content) == "" || utf8.RuneCountInString(m.Content) > MaxTextRunes {
+			return &protoError{"bad_text", fmt.Sprintf("text must hold 1..%d characters", MaxTextRunes)}
+		}
+		return validatePos(m)
 	case TypeUndo, TypeClear, TypeCloseRoom:
 	case TypeCursor:
 		if m.Pos == nil {
@@ -126,6 +154,18 @@ func validateInbound(m *Message) error {
 	default:
 		return &protoError{"unknown_type", fmt.Sprintf("unknown message type %q", m.Type)}
 	}
+	return nil
+}
+
+func validatePos(m *Message) error {
+	if m.Pos == nil {
+		return &protoError{"bad_pos", "pos is required"}
+	}
+	p, ok := normalizePoint(*m.Pos)
+	if !ok {
+		return &protoError{"bad_pos", "coordinates must be in [0,1]"}
+	}
+	m.Pos = &p
 	return nil
 }
 
