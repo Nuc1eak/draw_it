@@ -74,6 +74,28 @@ export function leaveLabel({ closed, creator }) {
   return creator ? "Закрити кімнату" : "Вийти";
 }
 
+export const CANVAS_ASPECT = 16 / 10;
+export const LAYOUT_GAP = 12;
+export const CARD_BORDERS = 2;
+export const TOOLBAR_MIN_W = 220;
+export const TOOLBAR_MAX_W = 300; // before scaling; ultrawide windows keep side margins
+export const TOOLBAR_MIN_SCALE = 0.75;
+export const TOOLBAR_CONTENT_H = 664; // the toolbar's natural height at scale 1
+
+// toolbarLayout shares a workspace of availW by availH between the canvas and
+// the toolbar. The canvas takes as much as it can while keeping its shape, the
+// toolbar takes the width left, and its contents scale with the window: up on
+// big screens, down in short windows so that nothing needs scrolling.
+// toolbarW is before scaling.
+export function toolbarLayout(availW, availH) {
+  const widest = availW - LAYOUT_GAP - TOOLBAR_MIN_W - CARD_BORDERS;
+  const canvasW = Math.max(200, Math.floor(Math.min(widest, (availH - CARD_BORDERS) * CANVAS_ASPECT)));
+  const width = availW - LAYOUT_GAP - canvasW - CARD_BORDERS;
+  const scale = Math.max(TOOLBAR_MIN_SCALE, Math.min(width / TOOLBAR_MIN_W, availH / TOOLBAR_CONTENT_H));
+  const toolbarW = Math.min(width / scale, TOOLBAR_MAX_W);
+  return { canvasW, canvasH: Math.floor(canvasW / CANVAS_ASPECT), toolbarW, scale };
+}
+
 // countdownText is shown during the last WARN_MS of a room's lifetime.
 export function countdownText(leftMs) {
   if (leftMs > WARN_MS) return null;

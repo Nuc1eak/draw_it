@@ -39,9 +39,18 @@ func New(reg *room.Registry, cfg room.Config, static http.FileSystem) *Server {
 	s.mux.HandleFunc("GET /api/rooms/{code}", s.roomInfo)
 	s.mux.HandleFunc("GET /ws/{code}", s.connect)
 	if static != nil {
-		s.mux.Handle("GET /", http.FileServer(static))
+		s.mux.Handle("GET /", noCache(http.FileServer(static)))
 	}
 	return s
+}
+
+// noCache makes browsers revalidate the frontend on every load. Without it they
+// may pair a new index.html with a stale style.css after an update.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }

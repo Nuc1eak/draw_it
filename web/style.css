@@ -306,43 +306,68 @@ button { cursor: pointer; }
 }
 
 .toolbar {
+  /* resize() in app.js sets both: the toolbar fills what the canvas leaves
+     and everything inside scales with the window. */
+  width: var(--toolbar-w, 220px);
+  zoom: var(--ui, 1);
+  flex: none;
   display: flex;
-  flex-wrap: wrap;
-  padding: 4px 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 0;
+  overflow: hidden auto;
+  border-radius: 24px;
 }
 
 .group {
-  flex: 1 1 auto;
+  flex: none;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   gap: 4px;
-  padding: 0 12px;
-  border-left: 1px solid var(--line);
+  padding: 8px 12px 0;
+  border-top: 1px solid var(--line);
 }
 
-.group:first-child { border-left: none; }
-.group.colors, .picker-group { flex-grow: 3; align-items: stretch; }
-.group.colors { gap: 0; }
-.toolbar .caption { text-align: center; }
+.group:first-child { border-top: none; padding-top: 0; }
 [inert] { opacity: 0.5; }
 
-.code-group { gap: 4px; }
-.code-text { display: flex; flex-direction: column; gap: 4px; text-align: center; }
+.code-group { gap: 8px; }
+.code-row { display: flex; align-items: center; gap: 4px; }
+.code-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+.icon-btn {
+  width: var(--hit);
+  height: var(--hit);
+  flex: none;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: 50%;
+}
+
+.icon-btn:hover { background: var(--hover); }
+.icon-btn[aria-pressed="true"] {
+  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+.members-toggle { width: 100%; height: var(--hit); gap: 8px; }
+.members-toggle span:first-child { flex: 1; text-align: left; }
 
 .room-code {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 700;
   line-height: 1.2;
   letter-spacing: 0.14em;
 }
 
-.swatches { display: flex; flex-wrap: wrap; justify-content: space-between; }
+.swatches { display: grid; grid-template-columns: repeat(5, 1fr); justify-items: center; }
 
 .swatch {
-  width: 30px;
-  height: var(--hit);
+  width: 100%;
+  height: 32px;
   display: grid;
   place-items: center;
   padding: 0;
@@ -364,12 +389,14 @@ button { cursor: pointer; }
 .swatch:disabled { cursor: default; }
 .swatch:disabled span { background: none; border: 1px dashed var(--control-border); }
 
-.picker { display: flex; gap: 12px; }
+/* Spare height goes to the palette, so groups stay together on tall screens. */
+.picker-group { flex: 1 1 auto; }
+.picker { flex: 1; display: flex; flex-direction: column; gap: 4px; }
 
 .sv {
   position: relative;
-  height: 92px;
-  flex: 1 1 100px;
+  flex: 1 1 72px;
+  min-height: 72px;
   border-radius: 14px;
   background:
     linear-gradient(to top, #000, transparent),
@@ -406,7 +433,7 @@ button { cursor: pointer; }
   pointer-events: none;
 }
 
-.sliders { flex: 1 1 130px; display: flex; flex-direction: column; gap: 4px; }
+.sliders { flex: none; display: flex; flex-direction: column; gap: 4px; }
 
 .preview {
   display: flex;
@@ -470,19 +497,13 @@ button { cursor: pointer; }
 .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; }
 
 .tool-btn {
-  height: 52px;
-  min-width: 56px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 4px;
+  height: var(--hit);
+  display: grid;
+  place-items: center;
+  padding: 0;
   background: var(--surface);
   border: 1px solid var(--control-border);
   border-radius: 14px;
-  font-size: 11px;
-  font-weight: 600;
 }
 
 .tool-btn:hover { background: var(--hover); }
@@ -502,14 +523,10 @@ button { cursor: pointer; }
 .width-slider output { font-size: 13px; font-weight: 600; text-align: right; }
 
 .actions {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 8px;
-  align-items: stretch;
-  justify-content: stretch;
+  display: flex;
+  flex-direction: row;
+  justify-content: space-between;
 }
-
-.actions .btn-tool { height: var(--hit); padding: 0 12px; }
 
 .closed {
   display: flex;
@@ -531,11 +548,17 @@ button { cursor: pointer; }
 }
 
 /* The canvas keeps 16:10 for everyone, so its card takes exactly the canvas
-   size and the members panel takes what is left. */
-.workspace-row { display: flex; align-items: flex-start; gap: 12px; }
+   size; the toolbar runs the full height beside it, on either side. */
+.workspace-row {
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+}
 
 .stage-wrap {
   flex: none;
+  align-self: center;
   overflow: hidden;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -592,9 +615,10 @@ canvas[data-tool="text"] { cursor: text; }
 }
 
 .members {
-  flex: 1;
-  min-width: 190px;
-  display: flex;
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  width: 260px;
   flex-direction: column;
   gap: 12px;
   padding: 16px;
@@ -603,7 +627,6 @@ canvas[data-tool="text"] { cursor: text; }
   border-radius: 24px;
 }
 
-.members-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 .members h2 { font-size: 16px; font-weight: 700; }
 
 #members {
@@ -639,13 +662,6 @@ canvas[data-tool="text"] { cursor: text; }
   font-weight: 500;
 }
 
-.members-foot {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.members-foot .btn { height: var(--hit); padding: 0 12px; }
 
 .countdown {
   color: var(--danger);
@@ -670,39 +686,25 @@ canvas[data-tool="text"] { cursor: text; }
 
 .toast.show { opacity: 1; }
 
+.members:popover-open { display: flex; }
+
 /* The page fits the window, so whatever the toolbar takes the canvas gives up. */
 @media (min-width: 1001px) {
   .room { height: 100vh; overflow: hidden; }
 }
 
-/* Toolbar groups no longer fit one row: dividers would float at line starts. */
-@media (max-width: 1080px) {
-  .toolbar { gap: 8px 0; }
-  .group { border-left: none; }
-  .code-group { flex-direction: row; justify-content: center; gap: 16px; }
-}
-
 /* The canvas keeps 16:10, so stacked it takes its height from its width. */
 @media (max-width: 1000px) {
   .workspace { flex: none; }
-  .workspace-row { flex-direction: column; }
-  .members { min-width: 0; }
+  .workspace-row { flex-direction: column; height: auto; }
+  .toolbar { width: auto; zoom: 1; overflow: visible; }
+  .swatch { height: var(--hit); }
 }
 
 @media (max-width: 640px) {
   :root { --hit: 44px; }
   .center { padding: 16px; }
   .lobby, .state { padding: 28px 20px; }
-  .toolbar { flex-direction: column; }
-  .group { padding: 4px 16px; }
-  .code-group { width: 100%; justify-content: space-between; }
-  .actions { flex-wrap: wrap; }
-  .btn-tool { flex: 1; justify-content: center; }
-  .code-group .btn-tool { flex: none; }
-}
-
-@media (max-width: 480px) {
-  .swatches { display: grid; grid-template-columns: repeat(5, 1fr); justify-items: center; }
 }
 
 @media (prefers-reduced-motion: reduce) {
